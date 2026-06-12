@@ -17,6 +17,16 @@ Translate, explain, and prototype ideas from research papers with small models.
 
 PaperLens Lab is a Hugging Face Space for turning a paper into a grounded reading guide and a small experiment card. It accepts a PDF, arXiv ID/URL, or pasted paper text, then separates direct paper claims from interpretation and generates a starter experiment scaffold.
 
+## Frontend Preview Baseline
+
+A Next.js frontend baseline now lives in `frontend/`. It is prepared as a static-first preview for showing the product frame before the backend is connected.
+
+- Default UI language: English.
+- Optional UI language: Korean.
+- Main route: `/reader`.
+- Build output: `frontend/out/`.
+- Current boundary: PDF parsing, translation generation, AI answers, and experiment generation are still mocked.
+
 ## What It Does
 
 - Extracts paper text from PDF, arXiv metadata, or pasted text.

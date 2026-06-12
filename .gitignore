@@ -11,3 +11,5 @@ build/
 .ruff_cache/
 outputs/
 tasks/
+PAPERLENS_HANDOFF.md
+플랜/
