@@ -6,6 +6,7 @@ import { Span, QAMessage, ViewMode } from "@/lib/types";
 import { Locale, UI_TEXT } from "@/lib/i18n";
 
 interface Props {
+  paperId: string;
   selectedSpanId: string | null;
   findSpan: (id: string) => Span | null;
   showQA: boolean;
@@ -19,6 +20,7 @@ interface Props {
 }
 
 export default function RightPanel({
+  paperId,
   selectedSpanId,
   findSpan,
   showQA,
@@ -66,6 +68,7 @@ export default function RightPanel({
 
     try {
       const answer = await askAboutSpan({
+        paperId,
         span,
         paperTitle,
         sourceText,
@@ -261,6 +264,18 @@ export default function RightPanel({
                             check output
                           </span>
                         )}
+                      </div>
+                    )}
+                    {msg.role === "assistant" && msg.evidenceWindow && (
+                      <div className="mt-2 rounded border border-border bg-surface-secondary px-2 py-1.5 text-[10px] leading-relaxed text-text-muted">
+                        <p>
+                          {locale === "ko" ? "근거 범위" : "Evidence window"}:{" "}
+                          <span className="font-mono">{msg.evidenceWindow.spanRange}</span>
+                        </p>
+                        <p>
+                          {locale === "ko" ? "원문 해시" : "Source hash"}:{" "}
+                          <span className="font-mono">{msg.evidenceWindow.sourceHash}</span>
+                        </p>
                       </div>
                     )}
                     {msg.role === "assistant" && msg.evidence && msg.evidence.length > 0 && (

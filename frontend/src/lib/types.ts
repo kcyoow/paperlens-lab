@@ -34,6 +34,18 @@ export interface PaperDocument {
   };
 }
 
+export interface EvidenceWindow {
+  paperId: string;
+  spanId: string;
+  spanRange: string;
+  sourceHash: string;
+  spans: Array<{
+    spanId: string;
+    textHash: string;
+    position?: number;
+  }>;
+}
+
 export type AnnotationType =
   | "highlight"
   | "underline"
@@ -57,6 +69,7 @@ export interface QAMessage {
   content: string;
   supportSpanIds?: string[];
   evidence?: Array<{ source_id?: string; quote?: string }>;
+  evidenceWindow?: EvidenceWindow | null;
   confidence?: "high" | "medium" | "low";
   needsMoreContext?: boolean;
   isExternalKnowledge?: boolean;

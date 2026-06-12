@@ -63,9 +63,6 @@ interface LabText {
   paperSays: string;
   interpretation: string;
   unsupportedAssumption: string;
-  paperSaysValue: string;
-  interpretationValue: string;
-  unsupportedAssumptionValue: string;
   hypothesis: string;
   baseline: string;
   metric: string;
@@ -180,12 +177,6 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       paperSays: "Paper says",
       interpretation: "Our interpretation",
       unsupportedAssumption: "Unsupported assumption",
-      paperSaysValue:
-        "Evidence-linked reranking improves top-k context precision, with the NLI-based evidential support score contributing the most.",
-      interpretationValue:
-        "Scoring passages by evidence quality, not only relevance, should reduce distracting context.",
-      unsupportedAssumptionValue:
-        "A lightweight NLI model may be enough to judge evidence, though domain-specific training could still be required.",
       hypothesis: "Hypothesis",
       baseline: "Baseline",
       metric: "Metric",
@@ -286,12 +277,6 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       paperSays: "Paper says",
       interpretation: "우리의 해석",
       unsupportedAssumption: "논문 밖 가정",
-      paperSaysValue:
-        "증거 연결 재순위화가 top-k 컨텍스트 정밀도를 향상시킨다. NLI 기반 증거 지원 점수가 가장 큰 기여를 한다.",
-      interpretationValue:
-        "단순 관련성이 아닌 '증거성'을 기준으로 passage를 평가하면 노이즈가 줄어든다.",
-      unsupportedAssumptionValue:
-        "경량 NLI 모델로도 충분한 증거 판별이 가능하다고 가정함. 실제로는 도메인 특화 학습이 필요할 수 있음.",
       hypothesis: "Hypothesis",
       baseline: "Baseline",
       metric: "Metric",

@@ -17,6 +17,13 @@ from .analysis import experiment_card, split_sentences, top_sentences
 from .ingest import PaperSource, build_source, clean_text
 from .memory_store import append_memory, load_memories, paper_key
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
+from .source_index import (
+    evidence_window,
+    get_cached_translation,
+    get_span_text,
+    save_cached_translation,
+    save_source_index,
+)
 from .tracing import trace_content_enabled
 from .ui import EXAMPLE_TEXT, build_demo
 
@@ -36,6 +43,7 @@ class PaperInput(BaseModel):
 
 
 class AskInput(BaseModel):
+    paper_id: str = ""
     span_id: str
     question: str = ""
     original: str
@@ -59,6 +67,15 @@ class ExperimentInput(BaseModel):
 class TranslationInput(BaseModel):
     paper_title: str = "Untitled paper"
     spans: list[dict[str, str]]
+    locale: str = "ko"
+    use_model: bool = False
+
+
+class TranslateSpanInput(BaseModel):
+    paper_id: str
+    paper_title: str = "Untitled paper"
+    span_id: str
+    source_text: str = ""
     locale: str = "ko"
     use_model: bool = False
 
@@ -197,6 +214,58 @@ def _register_api(app: FastAPI) -> None:
             "usedFallback": result.used_fallback,
         }
 
+    @app.post("/api/translate-span")
+    def translate_span(payload: TranslateSpanInput) -> dict[str, Any]:
+        source_text = clean_text(payload.source_text or get_span_text(payload.paper_id, payload.span_id))
+        if not source_text:
+            raise HTTPException(status_code=404, detail="Selected span was not found in the paper index.")
+        gateway = ModelGateway()
+        cached = get_cached_translation(
+            payload.paper_id,
+            payload.span_id,
+            source_text,
+            locale=payload.locale,
+            model=gateway.model_id,
+        )
+        if cached:
+            return {
+                "spanId": payload.span_id,
+                "translation": cached,
+                "status": "cached",
+                "model": gateway.model_id,
+                "provider": gateway.provider,
+                "usedFallback": False,
+            }
+        result = gateway.translate_spans(
+            payload.paper_title,
+            [{"span_id": payload.span_id, "text": source_text}],
+            locale=payload.locale,
+            use_model=_should_use_model(payload.use_model),
+        )
+        translation = ""
+        translations = result.data.get("translations", [])
+        if translations and isinstance(translations[0], dict):
+            translation = translations[0].get("translation", "")
+        if translation and not result.used_fallback:
+            save_cached_translation(
+                payload.paper_id,
+                payload.span_id,
+                source_text,
+                translation,
+                locale=payload.locale,
+                model=result.model,
+            )
+        return {
+            "spanId": payload.span_id,
+            "translation": translation,
+            "status": "ready" if translation and not result.used_fallback else "fallback",
+            "model": result.model,
+            "provider": result.provider,
+            "traceId": result.trace_id,
+            "error": result.error,
+            "usedFallback": result.used_fallback,
+        }
+
     @app.post("/api/ask")
     def ask_question(payload: AskInput) -> dict[str, Any]:
         question = clean_text(payload.question)
@@ -208,22 +277,25 @@ def _register_api(app: FastAPI) -> None:
             )
 
         gateway = ModelGateway()
+        window = evidence_window(payload.paper_id, payload.span_id) if payload.paper_id else None
+        source_text = window["text"] if window else payload.source_text
         result = gateway.answer_span(
             paper_title=payload.paper_title,
             span_id=payload.span_id,
             selected_span=payload.original,
             translated_span=payload.translated,
             question=question,
-            source_text=payload.source_text,
+            source_text=source_text,
             locale=payload.locale,
             use_model=_should_use_model(payload.use_model),
         )
-        answer_data, validation_error = _validated_answer_data(result.data, payload)
+        answer_data, validation_error = _validated_answer_data(result.data, payload, evidence_text=source_text)
         return {
             "role": "assistant",
             "content": answer_data.get("answer") or result.text or _fallback_answer(payload, question),
             "supportSpanIds": _support_ids(answer_data, payload.span_id),
             "evidence": answer_data.get("evidence", []),
+            "evidenceWindow": _public_evidence_window(window),
             "confidence": answer_data.get("confidence", "low"),
             "needsMoreContext": answer_data.get("needs_more_context", True),
             "model": result.model,
@@ -448,7 +520,7 @@ def paper_document_from_source(
             }
         )
 
-    return {
+    document = {
         "id": source.source_label.replace(":", "-").replace("/", "-").lower() or "paper",
         "title": source.title or "Untitled paper",
         "titleKo": source.title or "번역 제목 생성 대기",
@@ -467,6 +539,15 @@ def paper_document_from_source(
             "sourceTextChars": len(source.text),
         },
     }
+    save_source_index(
+        document["id"],
+        title=document["title"],
+        source_label=source.source_label,
+        pdf_url=source.pdf_url,
+        source_text=source.text,
+        sections=sections,
+    )
+    return document
 
 
 def _paper_payload_text(payload: PaperInput) -> str:
@@ -526,9 +607,20 @@ def _support_ids(data: dict[str, Any], fallback_span_id: str) -> list[str]:
     return list(dict.fromkeys(ids or [fallback_span_id]))
 
 
-def _validated_answer_data(data: dict[str, Any], payload: AskInput) -> tuple[dict[str, Any], str | None]:
-    evidence = data.get("evidence", []) if isinstance(data, dict) else []
-    source_pool = f"{payload.original}\n\n{payload.source_text}"
+def _validated_answer_data(
+    data: dict[str, Any],
+    payload: AskInput,
+    *,
+    evidence_text: str = "",
+) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(data, dict):
+        return _insufficient_answer(payload), "answer payload is not structured JSON"
+
+    evidence = data.get("evidence", [])
+    if not isinstance(evidence, list) or not evidence:
+        return _insufficient_answer(payload), "answer evidence is missing"
+
+    source_pool = f"{payload.original}\n\n{evidence_text or payload.source_text}"
     for item in evidence:
         if not isinstance(item, dict):
             return _insufficient_answer(payload), "answer evidence is not structured"
@@ -536,6 +628,27 @@ def _validated_answer_data(data: dict[str, Any], payload: AskInput) -> tuple[dic
         if quote and quote not in source_pool:
             return _insufficient_answer(payload), f"answer quote is not present in source evidence: {item.get('source_id', '')}"
     return data, None
+
+
+def _public_evidence_window(window: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not window:
+        return None
+    spans = []
+    for item in window.get("spans", []):
+        spans.append(
+            {
+                "spanId": item.get("span_id", ""),
+                "textHash": item.get("text_hash", ""),
+                "position": item.get("position"),
+            }
+        )
+    return {
+        "paperId": window.get("paper_id", ""),
+        "spanId": window.get("span_id", ""),
+        "spanRange": window.get("span_range", ""),
+        "sourceHash": window.get("source_hash", ""),
+        "spans": spans,
+    }
 
 
 def _insufficient_answer(payload: AskInput) -> dict[str, Any]:

@@ -2,12 +2,14 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from paperlens_lab.ingest import PaperSource
 from paperlens_lab.server import create_app, paper_document_from_source
+from paperlens_lab.source_index import load_source_index
 
 
 class BackendContractTests(unittest.TestCase):
@@ -15,11 +17,15 @@ class BackendContractTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         os.environ["PAPERLENS_TRACE_PATH"] = str(Path(self.tempdir.name) / "api_traces.jsonl")
         os.environ["PAPERLENS_MEMORY_PATH"] = str(Path(self.tempdir.name) / "paper_memory.jsonl")
+        os.environ["PAPERLENS_SOURCE_INDEX_DIR"] = str(Path(self.tempdir.name) / "source_index")
+        os.environ["PAPERLENS_TRANSLATION_CACHE_DIR"] = str(Path(self.tempdir.name) / "translation_cache")
         self.client = TestClient(create_app())
 
     def tearDown(self):
         os.environ.pop("PAPERLENS_TRACE_PATH", None)
         os.environ.pop("PAPERLENS_MEMORY_PATH", None)
+        os.environ.pop("PAPERLENS_SOURCE_INDEX_DIR", None)
+        os.environ.pop("PAPERLENS_TRANSLATION_CACHE_DIR", None)
         self.tempdir.cleanup()
 
     def test_health_exposes_runtime_switches(self):
@@ -79,6 +85,139 @@ class BackendContractTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["source"], "arXiv:1706.03762")
         self.assertIn("metadata", body)
+
+    def test_paper_document_writes_source_index_and_ask_uses_evidence_window(self):
+        source = PaperSource(
+            title="Windowed Evidence Paper",
+            authors="A. Author",
+            source_label="arXiv:1234.56789",
+            text=(
+                "Sentence one defines the retrieval task. "
+                "Sentence two describes the student query. "
+                "Sentence three introduces a compact reranker. "
+                "Sentence four reports that the compact reranker improves top five precision. "
+                "Sentence five limits the claim to controlled evidence settings. "
+                "Sentence six warns that broad deployment was not tested. "
+                "Sentence seven describes the ablation."
+            ),
+        )
+        document = paper_document_from_source(source, max_reader_spans=12)
+        paper_id = document["id"]
+        record = load_source_index(paper_id)
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record["paper_id"], paper_id)
+        self.assertGreaterEqual(len(record["spans"]), 7)
+
+        selected = document["sections"][0]["paragraphs"][0]["spans"][3]
+        with patch("paperlens_lab.server.ModelGateway") as gateway_cls:
+            gateway = gateway_cls.return_value
+            gateway.answer_span.return_value = SimpleNamespace(
+                data={
+                    "answer": "The claim is limited to the evidence window.",
+                    "evidence": [
+                        {
+                            "source_id": selected["id"],
+                            "quote": "Sentence four reports that the compact reranker improves top five precision.",
+                        }
+                    ],
+                    "confidence": "medium",
+                    "needs_more_context": True,
+                },
+                text="The claim is limited to the evidence window.",
+                model="test-model",
+                provider="hf",
+                trace_id="qa_window_test",
+                error=None,
+                used_fallback=False,
+            )
+
+            response = self.client.post(
+                "/api/ask",
+                json={
+                    "paper_id": paper_id,
+                    "span_id": selected["id"],
+                    "question": "What exactly does this support?",
+                    "original": selected["original"],
+                    "paper_title": document["title"],
+                    "source_text": "CLIENT TEXT SHOULD NOT BE USED WHEN INDEX EXISTS",
+                    "locale": "en",
+                    "use_model": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["usedFallback"])
+        self.assertEqual(body["evidenceWindow"]["spanId"], selected["id"])
+        self.assertIn("P0.S1-P0.S7", body["evidenceWindow"]["spanRange"])
+        model_source_text = gateway.answer_span.call_args.kwargs["source_text"]
+        self.assertIn("Sentence one defines the retrieval task.", model_source_text)
+        self.assertIn("Sentence seven describes the ablation.", model_source_text)
+        self.assertNotIn("CLIENT TEXT SHOULD NOT BE USED", model_source_text)
+
+    def test_translate_span_uses_source_index_and_cache(self):
+        source = PaperSource(
+            title="Translation Cache Paper",
+            authors="A. Author",
+            source_label="manual-cache",
+            text=(
+                "First sentence defines the setup. "
+                "Second sentence carries the metric. "
+                "Third sentence is selected for translation. "
+                "Fourth sentence gives the limitation."
+            ),
+        )
+        document = paper_document_from_source(source, max_reader_spans=12)
+        paper_id = document["id"]
+        selected = document["sections"][0]["paragraphs"][0]["spans"][2]
+
+        with patch("paperlens_lab.server.ModelGateway") as gateway_cls:
+            gateway = gateway_cls.return_value
+            gateway.model_id = "test-model"
+            gateway.provider = "hf"
+            gateway.translate_spans.return_value = SimpleNamespace(
+                data={
+                    "translations": [
+                        {
+                            "span_id": selected["id"],
+                            "translation": "세 번째 문장은 번역 캐시 검증을 위해 선택된다.",
+                        }
+                    ]
+                },
+                model="test-model",
+                provider="hf",
+                trace_id="translate_span_test",
+                error=None,
+                used_fallback=False,
+            )
+
+            first = self.client.post(
+                "/api/translate-span",
+                json={
+                    "paper_id": paper_id,
+                    "paper_title": document["title"],
+                    "span_id": selected["id"],
+                    "locale": "ko",
+                    "use_model": True,
+                },
+            )
+            second = self.client.post(
+                "/api/translate-span",
+                json={
+                    "paper_id": paper_id,
+                    "paper_title": document["title"],
+                    "span_id": selected["id"],
+                    "locale": "ko",
+                    "use_model": True,
+                },
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["translation"], "세 번째 문장은 번역 캐시 검증을 위해 선택된다.")
+        self.assertEqual(second.json()["status"], "cached")
+        self.assertEqual(gateway.translate_spans.call_count, 1)
 
     def test_paper_document_translates_in_small_batches(self):
         os.environ["PAPERLENS_TRANSLATION_BATCH_SIZE"] = "2"

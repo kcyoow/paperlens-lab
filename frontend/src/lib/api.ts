@@ -1,4 +1,4 @@
-import { PaperDocument, QAMessage, Span } from "./types";
+import { EvidenceWindow, PaperDocument, QAMessage, Span } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 const USE_MODEL = ["1", "true", "yes"].includes(
@@ -37,6 +37,17 @@ export interface GrowthResult {
   reason: string;
   paperId?: string;
   memoryCount?: number;
+  model?: string;
+  provider?: string;
+  traceId?: string;
+  error?: string | null;
+  usedFallback?: boolean;
+}
+
+export interface SpanTranslationResult {
+  spanId: string;
+  translation: string;
+  status: "ready" | "cached" | "fallback";
   model?: string;
   provider?: string;
   traceId?: string;
@@ -90,6 +101,7 @@ export async function uploadPaper(file: File, maxPdfPages = 10): Promise<PaperDo
 }
 
 export async function askAboutSpan(params: {
+  paperId: string;
   span: Span;
   paperTitle: string;
   sourceText: string;
@@ -100,6 +112,7 @@ export async function askAboutSpan(params: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      paper_id: params.paperId,
       span_id: params.span.id,
       question: params.question,
       original: params.span.original,
@@ -115,6 +128,7 @@ export async function askAboutSpan(params: {
     content: string;
     supportSpanIds?: string[];
     evidence?: Array<{ source_id?: string; quote?: string }>;
+    evidenceWindow?: EvidenceWindow | null;
     confidence?: "high" | "medium" | "low";
     needsMoreContext?: boolean;
     model?: string;
@@ -129,6 +143,7 @@ export async function askAboutSpan(params: {
     content: body.content,
     supportSpanIds: body.supportSpanIds,
     evidence: body.evidence,
+    evidenceWindow: body.evidenceWindow,
     confidence: body.confidence,
     needsMoreContext: body.needsMoreContext,
     isBackendGenerated: true,
@@ -138,6 +153,27 @@ export async function askAboutSpan(params: {
     error: body.error,
     usedFallback: body.usedFallback,
   };
+}
+
+export async function translateSelectedSpan(params: {
+  paperId: string;
+  paperTitle: string;
+  span: Span;
+  locale?: "ko";
+}): Promise<SpanTranslationResult> {
+  const response = await fetch(`${API_BASE}/api/translate-span`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      paper_id: params.paperId,
+      paper_title: params.paperTitle,
+      span_id: params.span.id,
+      source_text: params.span.original,
+      locale: params.locale ?? "ko",
+      use_model: USE_MODEL,
+    }),
+  });
+  return parseJson<SpanTranslationResult>(response);
 }
 
 export async function buildExperiment(params: {
@@ -163,6 +199,7 @@ export async function buildExperiment(params: {
 }
 
 export async function buildGrowthIdeas(params: {
+  paperId?: string;
   span: Span;
   paperTitle: string;
   paperMemory: Array<Record<string, unknown>>;
@@ -173,6 +210,7 @@ export async function buildGrowthIdeas(params: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      paper_id: params.paperId ?? "",
       paper_title: params.paperTitle,
       selected_span: params.span.original,
       paper_memory: params.paperMemory,

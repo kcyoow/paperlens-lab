@@ -2,7 +2,12 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { MOCK_PAPER } from "@/lib/mock-data";
-import { askAboutSpan, loadPaperFromSession } from "@/lib/api";
+import {
+  askAboutSpan,
+  loadPaperFromSession,
+  savePaperToSession,
+  translateSelectedSpan,
+} from "@/lib/api";
 import {
   ViewMode,
   Annotation,
@@ -56,6 +61,49 @@ export default function ReaderPage() {
   function handleSpanClick(spanId: string) {
     setSelectedSpanId(spanId);
     setActiveSourceSpanId(spanId);
+    void ensureSpanTranslation(spanId);
+  }
+
+  function updateSpanTranslation(spanId: string, translated: string) {
+    setPaper((currentPaper) => {
+      const nextPaper = {
+        ...currentPaper,
+        sections: currentPaper.sections.map((section) => ({
+          ...section,
+          paragraphs: section.paragraphs.map((paragraph) => ({
+            ...paragraph,
+            spans: paragraph.spans.map((span) =>
+              span.id === spanId ? { ...span, translated } : span,
+            ),
+          })),
+        })),
+      };
+      savePaperToSession(nextPaper);
+      return nextPaper;
+    });
+  }
+
+  async function ensureSpanTranslation(spanId: string) {
+    const span = findSpan(spanId);
+    if (!span || !isDraftTranslation(span.translated)) return;
+
+    updateSpanTranslation(
+      spanId,
+      locale === "ko" ? "모델 번역 생성 중..." : "Generating model translation...",
+    );
+    try {
+      const result = await translateSelectedSpan({
+        paperId: paper.id,
+        paperTitle: paper.title,
+        span,
+        locale: "ko",
+      });
+      if (result.translation) {
+        updateSpanTranslation(spanId, result.translation);
+      }
+    } catch {
+      updateSpanTranslation(spanId, span.translated);
+    }
   }
 
   function handleAnnotate(type: AnnotationType) {
@@ -106,6 +154,7 @@ export default function ReaderPage() {
     setQaMessages((messages) => [...messages, userMsg, pendingMsg]);
     try {
       const answer = await askAboutSpan({
+        paperId: paper.id,
         span,
         paperTitle: paper.title,
         sourceText,
@@ -253,6 +302,7 @@ export default function ReaderPage() {
 
         {/* Right Panel */}
         <RightPanel
+          paperId={paper.id}
           selectedSpanId={activeSourceSpanId}
           findSpan={findSpan}
           showQA={showQA}
@@ -281,12 +331,22 @@ export default function ReaderPage() {
         <LabModal
           span={labSpan}
           locale={locale}
+          paperId={paper.id}
           paperTitle={paper.title}
           sourceText={sourceText}
           onClose={() => setLabSpan(null)}
         />
       )}
     </div>
+  );
+}
+
+function isDraftTranslation(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.startsWith("[초안 번역]") ||
+    trimmed.startsWith("[Korean draft pending]") ||
+    trimmed === ""
   );
 }
 
