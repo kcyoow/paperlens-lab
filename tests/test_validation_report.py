@@ -35,6 +35,7 @@ class ValidationReportTests(unittest.TestCase):
         self.assertEqual(summary["realPaperRun"]["paperCount"], 2)
         self.assertEqual(summary["realPaperRun"]["evaluationPassed"], 4)
         self.assertEqual(summary["realPaperRun"]["evaluationTotal"], 4)
+        self.assertTrue(summary["realPaperRun"]["evidenceConsistencyPassed"])
         self.assertEqual(summary["realPaperRun"]["fineTuningRecommendation"], "no")
         self.assertEqual(summary["modelTraces"]["total"], 4)
         self.assertEqual(summary["modelTraces"]["fallbackCount"], 0)
@@ -45,6 +46,7 @@ class ValidationReportTests(unittest.TestCase):
         self.assertEqual(summary["localDemo"]["sourceHash"], "matching-source-hash")
         self.assertEqual(summary["localDemo"]["sourceIndexHash"], "matching-source-hash")
         self.assertTrue(summary["localDemo"]["sourceIndexConsistent"])
+        self.assertTrue(summary["localDemo"]["quoteIdsWithinWindow"])
         self.assertFalse(summary["localDemo"]["usedFallback"])
 
     def test_source_index_mismatch_marks_validation_not_ok(self):
@@ -65,6 +67,56 @@ class ValidationReportTests(unittest.TestCase):
         self.assertFalse(summary["ok"])
         self.assertFalse(summary["localDemo"]["sourceIndexConsistent"])
         self.assertIn("source hash differs", " ".join(summary["warnings"]))
+
+    def test_unknown_local_evidence_id_marks_validation_not_ok(self):
+        ask_path = self.day / "local_after_source_index_ask_p3s9.json"
+        body = json.loads(ask_path.read_text(encoding="utf-8"))
+        body["evidence"].append({"source_id": "S3", "quote": "A generated evidence id."})
+        ask_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["localDemo"]["quoteIdsWithinWindow"])
+        self.assertEqual(summary["localDemo"]["unknownEvidenceIds"], ["S3"])
+
+    def test_stale_summary_without_source_evidence_is_not_green(self):
+        stale_dir = self.day / "hf_three_papers_stale"
+        stale_dir.mkdir()
+        stale_summary = {
+            "passed": True,
+            "paper_count": 3,
+            "fine_tuning": {"recommendation": "no", "reason": "", "repeated_failures": []},
+            "runs": [
+                {
+                    **self._paper_run("stale", "9999.99999", "Stale Paper", 12000),
+                    "model_outputs": {
+                        "qa": [
+                            {
+                                "span": {"id": "P0.S1"},
+                                "result": {
+                                    "data": {
+                                        "evidence": [{"source_id": "S9", "quote": "not bound"}],
+                                    }
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        (stale_dir / "summary.json").write_text(json.dumps(stale_summary), encoding="utf-8")
+        self._write_jsonl(
+            self.day / "hf_three_papers_stale_traces.jsonl",
+            [
+                {"task": "grounded_qa", "status": "model", "provider": "hf", "model": "test-small", "error": None},
+            ],
+        )
+
+        summary = build_validation_summary(self.root)
+
+        self.assertEqual(summary["realPaperRun"]["runName"], "hf_three_papers_rerun")
+        self.assertTrue(summary["realPaperRun"]["evidenceConsistencyPassed"])
 
     def test_validation_endpoint_returns_summary(self):
         client = TestClient(create_app())
@@ -125,6 +177,7 @@ class ValidationReportTests(unittest.TestCase):
                         "spanId": "P3.S9",
                         "spanRange": "P3.S6-P3.S12",
                         "sourceHash": "matching-source-hash",
+                        "spans": [{"spanId": "P3.S9", "textHash": "span-hash", "position": 99}],
                     },
                 }
             ),
@@ -177,6 +230,24 @@ class ValidationReportTests(unittest.TestCase):
                 {"name": "pdf_parse_and_reader_spans", "passed": True, "reasons": []},
                 {"name": "grounded_qa", "passed": True, "reasons": []},
             ],
+            "model_outputs": {
+                "qa": [
+                    {
+                        "span": {"id": "P3.S9"},
+                        "source_evidence": {"P3.S9": "In this work we propose the Transformer"},
+                        "result": {
+                            "data": {
+                                "evidence": [
+                                    {
+                                        "source_id": "P3.S9",
+                                        "quote": "In this work we propose the Transformer",
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ]
+            },
         }
 
     def _write_jsonl(self, path, records):

@@ -36,6 +36,7 @@ def build_validation_summary(root: Path | None = None) -> dict[str, Any]:
     ok = bool(
         real_paper_run
         and real_paper_run.get("passed")
+        and real_paper_run.get("evidenceConsistencyPassed")
         and trace_summary
         and trace_summary.get("fallbackCount") == 0
         and trace_summary.get("errorCount") == 0
@@ -60,12 +61,18 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
             continue
         paper_count = int(body.get("paper_count") or len(body.get("runs", [])) or 0)
         passed_rank = 1 if body.get("passed") else 0
-        candidates.append((passed_rank, paper_count, path.stat().st_mtime, path, body))
+        evidence_issues = _real_paper_evidence_issues(body)
+        consistency_rank = 0 if evidence_issues else 1
+        candidates.append((passed_rank, consistency_rank, paper_count, path.stat().st_mtime, path, body, evidence_issues))
     if not candidates:
         warnings.append("no real-paper summary.json found")
         return None
 
-    _, _, _, path, body = max(candidates, key=lambda item: (item[0], item[1], item[2]))
+    _, _, _, _, path, body, evidence_issues = max(candidates, key=lambda item: (item[0], item[1], item[2], item[3]))
+    if evidence_issues:
+        warnings.append(
+            f"real-paper summary evidence consistency needs rerun: {len(evidence_issues)} issue(s)"
+        )
     runs = body.get("runs", []) if isinstance(body.get("runs"), list) else []
     papers = []
     evaluation_total = 0
@@ -115,6 +122,8 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
         "paperCount": int(body.get("paper_count") or len(papers)),
         "evaluationPassed": evaluation_passed,
         "evaluationTotal": evaluation_total,
+        "evidenceConsistencyPassed": not evidence_issues,
+        "evidenceConsistencyIssues": evidence_issues[:12],
         "fineTuningRecommendation": fine_tuning.get("recommendation", "unknown"),
         "fineTuningReason": fine_tuning.get("reason", ""),
         "repeatedFailures": fine_tuning.get("repeated_failures", []),
@@ -191,6 +200,21 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
     source_index_hash = source_index.get("source_text_hash", "") if source_index else ""
     source_index_chars = source_index.get("source_text_chars", 0) if source_index else 0
     source_index_consistent = True
+    allowed_evidence_ids = {
+        str(item.get("spanId", ""))
+        for item in evidence_window.get("spans", [])
+        if isinstance(item, dict) and item.get("spanId")
+    }
+    if evidence_window.get("spanId"):
+        allowed_evidence_ids.add(str(evidence_window.get("spanId")))
+    evidence_ids = [
+        str(item.get("source_id", ""))
+        for item in evidence
+        if isinstance(item, dict) and item.get("source_id")
+    ]
+    unknown_evidence_ids = sorted(
+        source_id for source_id in set(evidence_ids) if allowed_evidence_ids and source_id not in allowed_evidence_ids
+    )
     if source_index_hash and evidence_window.get("sourceHash") and source_index_hash != evidence_window.get("sourceHash"):
         source_index_consistent = False
         warnings.append(
@@ -200,6 +224,11 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         source_index_consistent = False
         warnings.append(
             "local paper metadata source length differs from current source index; rerun local browser/API proof"
+        )
+    if unknown_evidence_ids:
+        source_index_consistent = False
+        warnings.append(
+            "local selected-span answer cites evidence outside the source-index window; rerun local browser/API proof"
         )
     return {
         "askPath": str(ask_paths[0]),
@@ -214,6 +243,9 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         "sourceIndexHash": source_index_hash,
         "sourceIndexConsistent": source_index_consistent,
         "neighborSpans": evidence_window.get("spans", []),
+        "evidenceIds": evidence_ids,
+        "unknownEvidenceIds": unknown_evidence_ids,
+        "quoteIdsWithinWindow": not unknown_evidence_ids,
         "quoteCount": len(evidence),
         "confidence": ask.get("confidence", ""),
         "needsMoreContext": bool(ask.get("needsMoreContext")),
@@ -225,6 +257,37 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         "translationTraceId": translate.get("traceId", "") if isinstance(translate, dict) else "",
         "translationUsedFallback": bool(translate.get("usedFallback")) if isinstance(translate, dict) else False,
     }
+
+
+def _real_paper_evidence_issues(body: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    runs = body.get("runs", []) if isinstance(body.get("runs"), list) else []
+    for run in runs:
+        case_name = (run.get("case") or {}).get("name", "unknown") if isinstance(run, dict) else "unknown"
+        qa_runs = ((run.get("model_outputs") or {}).get("qa") or []) if isinstance(run, dict) else []
+        for qa in qa_runs:
+            if not isinstance(qa, dict):
+                continue
+            span = qa.get("span") if isinstance(qa.get("span"), dict) else {}
+            span_id = span.get("id", "unknown")
+            source_evidence = qa.get("source_evidence") if isinstance(qa.get("source_evidence"), dict) else {}
+            result = qa.get("result") if isinstance(qa.get("result"), dict) else {}
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            evidence = data.get("evidence") if isinstance(data.get("evidence"), list) else []
+            if not source_evidence:
+                issues.append(f"{case_name}:{span_id} missing source_evidence map")
+                continue
+            for item in evidence:
+                if not isinstance(item, dict):
+                    continue
+                source_id = str(item.get("source_id", ""))
+                quote = str(item.get("quote", "")).strip()
+                if source_id and source_id not in source_evidence:
+                    issues.append(f"{case_name}:{span_id} cites unknown evidence {source_id}")
+                    continue
+                if quote and source_id and quote not in str(source_evidence.get(source_id, "")):
+                    issues.append(f"{case_name}:{span_id} quote missing from {source_id}")
+    return issues
 
 
 def _memory_summary_for_run(

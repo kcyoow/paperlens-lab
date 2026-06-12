@@ -322,6 +322,13 @@ function ValidationEvidencePanel({
       ? "현재 로컬 검증 artifact 기준이며, 새 배포 환경에서는 다시 실행해야 합니다."
       : "Based on local validation artifacts; fresh deployments should run this again.";
   const fineTuning = realPaperRun?.fineTuningRecommendation ?? "unknown";
+  const papers = realPaperRun?.papers?.map((paper) => paper.arxiv || paper.name).filter(Boolean) ?? [];
+  const firstPaper = realPaperRun?.papers?.[0];
+  const scope = firstPaper
+    ? `${firstPaper.pageMarkers} parsed pages · ${firstPaper.readerSpans}/${firstPaper.totalSentenceCount || firstPaper.readerSpans} reader spans`
+    : "no scope";
+  const evidenceOk =
+    realPaperRun?.evidenceConsistencyPassed !== false && localDemo?.quoteIdsWithinWindow !== false;
 
   return (
     <section className="mt-5 rounded-2xl border border-border bg-surface p-5 shadow-sm">
@@ -342,7 +349,7 @@ function ValidationEvidencePanel({
               : "bg-yellow-100 text-yellow-700"
           }`}
         >
-          {summary.ok ? "model-backed" : "needs rerun"}
+          {summary.ok ? "stored HF traces" : "needs rerun"}
         </span>
       </div>
 
@@ -365,6 +372,27 @@ function ValidationEvidencePanel({
         />
       </div>
 
+      <div className="mt-4 grid gap-2 text-[11px] text-text-muted sm:grid-cols-3">
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "논문" : "Papers"}:
+          </span>{" "}
+          {papers.length > 0 ? papers.join(" · ") : "n/a"}
+        </p>
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "범위" : "Scope"}:
+          </span>{" "}
+          {scope}
+        </p>
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "근거 ID" : "Evidence IDs"}:
+          </span>{" "}
+          {evidenceOk ? "verified" : "rerun needed"}
+        </p>
+      </div>
+
       <div className="mt-4 grid gap-3 text-xs text-text-secondary sm:grid-cols-3">
         <p>
           <span className="font-semibold text-text-primary">
@@ -372,7 +400,7 @@ function ValidationEvidencePanel({
           </span>{" "}
           {localDemo?.selectedSpanId || "n/a"} · {localDemo?.evidenceWindow || "no window"} ·{" "}
           {localDemo?.quoteCount ?? 0} quotes
-          {localDemo?.sourceIndexConsistent === false ? " · hash rerun needed" : ""}
+          {localDemo?.sourceIndexConsistent === false ? " · rerun needed" : ""}
         </p>
         <p>
           <span className="font-semibold text-text-primary">

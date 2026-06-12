@@ -42,6 +42,37 @@ class ScenarioEvalTests(unittest.TestCase):
         self.assertTrue(any("dropped number" in reason for reason in result.reasons))
         self.assertTrue(any("negation" in reason for reason in result.reasons))
 
+    def test_translation_allows_supported_cross_lingual_superlatives(self):
+        result = evaluate_translation(
+            "The model reaches a single-model state-of-the-art BLEU score after eight GPUs.",
+            {
+                "translations": [
+                    {
+                        "span_id": "P0.S1",
+                        "translation": "이 모델은 8개의 GPU 이후 단일 모델 기준 최고 BLEU 점수에 도달한다.",
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(result.passed, result.reasons)
+
+    def test_translation_still_rejects_unsupported_proof_claims(self):
+        result = evaluate_translation(
+            "The method improves F1 in a toy setting.",
+            {
+                "translations": [
+                    {
+                        "span_id": "P0.S1",
+                        "translation": "이 방법은 모든 환경에서 F1 향상을 증명한다.",
+                    }
+                ]
+            },
+        )
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("unsupported strong claim" in reason for reason in result.reasons))
+
     def test_grounded_qa_requires_selected_span_evidence(self):
         result = evaluate_grounded_qa(
             {
@@ -82,6 +113,24 @@ class ScenarioEvalTests(unittest.TestCase):
             source_evidence={"P0.S1": "We experiment with RAG in a wide range of tasks."},
         )
         self.assertTrue(result.passed, result.reasons)
+
+    def test_grounded_qa_rejects_unknown_evidence_ids(self):
+        result = evaluate_grounded_qa(
+            {
+                "answer": "선택 문장과 별도 근거를 함께 설명한다.",
+                "evidence": [
+                    {"source_id": "P0.S1", "quote": "The selected claim is narrow."},
+                    {"source_id": "S9", "quote": "A separate global sentence."},
+                ],
+                "confidence": "medium",
+                "needs_more_context": False,
+            },
+            "P0.S1",
+            source_evidence={"P0.S1": "The selected claim is narrow."},
+        )
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("unknown evidence S9" in reason for reason in result.reasons))
 
     def test_experiment_spec_requires_runnable_fields(self):
         result = evaluate_experiment_spec(

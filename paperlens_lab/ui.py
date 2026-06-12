@@ -530,6 +530,12 @@ def _source_from_inputs(uploaded_pdf, arxiv_or_url, pasted_text, max_pdf_pages) 
     return build_source(uploaded_pdf, arxiv_or_url or "", pasted_text or "", int(max_pdf_pages))
 
 
+def _effective_pasted_text(uploaded_pdf, arxiv_or_url, pasted_text) -> str:
+    if uploaded_pdf or str(arxiv_or_url or "").strip():
+        return ""
+    return pasted_text or EXAMPLE_TEXT
+
+
 def _escape(value: str) -> str:
     return html.escape(value or "", quote=True)
 
@@ -729,7 +735,12 @@ def render_reader(source: PaperSource, view_mode: str = "original", locale: str 
 
 def load_reader(uploaded_pdf, arxiv_or_url, pasted_text, view_mode, locale, max_pdf_pages):
     try:
-        source = _source_from_inputs(uploaded_pdf, arxiv_or_url, pasted_text or EXAMPLE_TEXT, max_pdf_pages)
+        source = _source_from_inputs(
+            uploaded_pdf,
+            arxiv_or_url,
+            _effective_pasted_text(uploaded_pdf, arxiv_or_url, pasted_text),
+            max_pdf_pages,
+        )
         if not uploaded_pdf and not arxiv_or_url and not pasted_text:
             source = PaperSource(
                 title="Improving Retrieval-Augmented Generation with Evidence-Linked Reranking",
@@ -750,7 +761,12 @@ def load_reader(uploaded_pdf, arxiv_or_url, pasted_text, view_mode, locale, max_
 
 def run_analysis(uploaded_pdf, arxiv_or_url, pasted_text, max_pdf_pages, use_model):
     try:
-        source = _source_from_inputs(uploaded_pdf, arxiv_or_url, pasted_text or EXAMPLE_TEXT, max_pdf_pages)
+        source = _source_from_inputs(
+            uploaded_pdf,
+            arxiv_or_url,
+            _effective_pasted_text(uploaded_pdf, arxiv_or_url, pasted_text),
+            max_pdf_pages,
+        )
         return analyze_paper(source, "Research reader", "Source-grounded translation and experiment design", use_model)
     except Exception as exc:
         message = f"## Could not analyze paper\n\n{exc}"
@@ -759,7 +775,12 @@ def run_analysis(uploaded_pdf, arxiv_or_url, pasted_text, max_pdf_pages, use_mod
 
 def run_experiment(uploaded_pdf, arxiv_or_url, pasted_text, idea, max_pdf_pages, use_model):
     try:
-        source = _source_from_inputs(uploaded_pdf, arxiv_or_url, pasted_text or EXAMPLE_TEXT, max_pdf_pages)
+        source = _source_from_inputs(
+            uploaded_pdf,
+            arxiv_or_url,
+            _effective_pasted_text(uploaded_pdf, arxiv_or_url, pasted_text),
+            max_pdf_pages,
+        )
         return experiment_card(source, idea, "Research reader", use_model)
     except Exception as exc:
         return f"## Could not build experiment card\n\n{exc}", ""

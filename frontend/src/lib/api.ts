@@ -56,9 +56,12 @@ export interface ValidationSummary {
     paperCount: number;
     evaluationPassed: number;
     evaluationTotal: number;
+    evidenceConsistencyPassed?: boolean;
+    evidenceConsistencyIssues?: string[];
     fineTuningRecommendation: string;
     fineTuningReason: string;
     papers: Array<{
+      name: string;
       title: string;
       arxiv: string;
       pageMarkers: number;
@@ -93,6 +96,9 @@ export interface ValidationSummary {
     sourceHash?: string;
     sourceIndexHash?: string;
     sourceIndexConsistent?: boolean;
+    evidenceIds?: string[];
+    unknownEvidenceIds?: string[];
+    quoteIdsWithinWindow?: boolean;
     neighborSpans?: Array<{ spanId: string; textHash: string; position?: number }>;
     quoteCount: number;
     confidence: string;

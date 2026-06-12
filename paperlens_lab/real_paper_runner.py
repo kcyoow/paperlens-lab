@@ -8,7 +8,7 @@ from typing import Any
 
 from .ingest import PaperSource, build_source
 from .memory_store import append_memory, load_memories, paper_key
-from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, ModelGateway
+from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, ModelGateway, evidence_map
 from .scenario_eval import (
     EvalResult,
     FailureRecord,
@@ -97,6 +97,7 @@ def run_real_paper_case(
 
     qa_runs = []
     for item in selected:
+        source_evidence = evidence_map(source.text, item["original"], span_id=item["id"])
         qa = gateway.answer_span(
             paper_title=document["title"],
             span_id=item["id"],
@@ -107,7 +108,14 @@ def run_real_paper_case(
             locale=locale,
             use_model=use_model,
         )
-        qa_runs.append({"position": item["position"], "span": item, "result": _public_result(qa)})
+        qa_runs.append(
+            {
+                "position": item["position"],
+                "span": item,
+                "source_evidence": source_evidence,
+                "result": _public_result(qa),
+            }
+        )
 
     experiment = gateway.experiment_spec(
         paper_title=document["title"],
@@ -184,7 +192,7 @@ def run_real_paper_case(
             ],
         },
         "evaluations": [asdict(item) for item in evals],
-        "fine_tuning": fine_tuning_gate(failures),
+        "fine_tuning": fine_tuning_gate(failures) if use_model else _no_model_fine_tuning_decision(),
         "model_outputs": {
             "translation": _public_result(translations),
             "qa": qa_runs,
@@ -242,7 +250,7 @@ def run_real_papers(
     summary = {
         "passed": all(run["passed"] for run in runs),
         "paper_count": len(runs),
-        "fine_tuning": fine_tuning_gate(failures),
+        "fine_tuning": fine_tuning_gate(failures) if use_model else _no_model_fine_tuning_decision(),
         "runs": runs,
     }
     if output_dir is not None:
@@ -269,19 +277,70 @@ def _flatten_reader_spans(document: dict[str, Any]) -> list[dict[str, Any]]:
 def _selected_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(spans) <= 3:
         return [{**span, "position_label": f"span-{index + 1}"} for index, span in enumerate(spans)]
-    positions = [
+    anchors = [
         ("front", max(0, len(spans) // 10)),
         ("middle", len(spans) // 2),
         ("end", max(0, len(spans) - 2)),
     ]
     selected = []
     seen = set()
-    for label, position in positions:
+    for label, anchor in anchors:
+        position = _nearest_informative_position(spans, anchor, seen)
         if position in seen:
             continue
         seen.add(position)
         selected.append({**spans[position], "position_label": label})
     return selected
+
+
+def _nearest_informative_position(spans: list[dict[str, Any]], anchor: int, seen: set[int]) -> int:
+    window = max(12, min(36, len(spans) // 5))
+    start = max(0, anchor - window)
+    end = min(len(spans), anchor + window + 1)
+    candidates = [position for position in range(start, end) if position not in seen]
+    if not candidates:
+        return min(anchor, len(spans) - 1)
+    return max(
+        candidates,
+        key=lambda position: (_span_information_score(spans[position]), -abs(position - anchor), -position),
+    )
+
+
+def _span_information_score(span: dict[str, Any]) -> float:
+    text = str(span.get("original", "")).strip()
+    lower = text.lower()
+    length = len(text)
+    score = min(length, 240) / 60
+    if length < 45:
+        score -= 3
+    if length > 420:
+        score -= 1
+    for marker in (
+        "we ",
+        "propose",
+        "show",
+        "result",
+        "experiment",
+        "method",
+        "model",
+        "baseline",
+        "metric",
+        "limitation",
+        "improve",
+        "reduce",
+        "increase",
+    ):
+        if marker in lower:
+            score += 1
+    if any(char.isdigit() for char in text):
+        score += 1
+    if any(char.isupper() for char in text):
+        score += 0.5
+    if lower.startswith(("table ", "figure ", "fig. ", "http", "www.")):
+        score -= 2
+    if "@" in text or "copyright" in lower or "permission" in lower:
+        score -= 3
+    return score
 
 
 def _evaluate_run(
@@ -307,7 +366,7 @@ def _evaluate_run(
             evaluate_grounded_qa(
                 run["result"]["data"],
                 span["id"],
-                source_evidence={span["id"]: span["original"]},
+                source_evidence=run.get("source_evidence") or {span["id"]: span["original"]},
                 require_needs_more_context=False,
             )
         )
@@ -422,6 +481,14 @@ def _root_cause(reason: str) -> str:
     if "fallback" in lowered or "middle" in lowered or "unsupported" in lowered:
         return "model_capability"
     return "retrieval"
+
+
+def _no_model_fine_tuning_decision() -> dict[str, Any]:
+    return {
+        "recommendation": "no",
+        "reason": "Model-backed validation was not enabled, so fallback behavior cannot justify fine-tuning.",
+        "repeated_failures": [],
+    }
 
 
 def _public_result(result: Any) -> dict[str, Any]:

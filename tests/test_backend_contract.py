@@ -155,6 +155,59 @@ class BackendContractTests(unittest.TestCase):
         self.assertIn("Sentence one defines the retrieval task.", model_source_text)
         self.assertIn("Sentence seven describes the ablation.", model_source_text)
         self.assertNotIn("CLIENT TEXT SHOULD NOT BE USED", model_source_text)
+        evidence_items = gateway.answer_span.call_args.kwargs["evidence_items_override"]
+        self.assertEqual({item["source_id"] for item in evidence_items}, {span["span_id"] for span in record["spans"]})
+
+    def test_ask_endpoint_rejects_source_id_outside_evidence_window(self):
+        source = PaperSource(
+            title="Window Boundary Paper",
+            authors="A. Author",
+            source_label="manual-window",
+            text=(
+                "First sentence defines the setup. "
+                "Second sentence carries the selected claim. "
+                "Third sentence gives the local limitation."
+            ),
+        )
+        document = paper_document_from_source(source, max_reader_spans=12)
+        paper_id = document["id"]
+        selected = document["sections"][0]["paragraphs"][0]["spans"][1]
+
+        with patch("paperlens_lab.server.ModelGateway") as gateway_cls:
+            gateway = gateway_cls.return_value
+            gateway.answer_span.return_value = SimpleNamespace(
+                data={
+                    "answer": "This cites a generated id that is not in the source-index window.",
+                    "evidence": [{"source_id": "S3", "quote": selected["original"]}],
+                    "confidence": "high",
+                    "needs_more_context": False,
+                },
+                text="This cites a generated id that is not in the source-index window.",
+                model="test-model",
+                provider="hf",
+                trace_id="qa_window_id_test",
+                error=None,
+                used_fallback=False,
+            )
+
+            response = self.client.post(
+                "/api/ask",
+                json={
+                    "paper_id": paper_id,
+                    "span_id": selected["id"],
+                    "question": "What exactly does this support?",
+                    "original": selected["original"],
+                    "paper_title": document["title"],
+                    "locale": "en",
+                    "use_model": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["usedFallback"])
+        self.assertEqual(body["confidence"], "low")
+        self.assertIn("outside the selected evidence window", body["error"])
 
     def test_translate_span_uses_source_index_and_cache(self):
         source = PaperSource(

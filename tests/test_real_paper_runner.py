@@ -6,7 +6,7 @@ from pathlib import Path
 
 from paperlens_lab.ingest import PaperSource
 from paperlens_lab.model_adapter import ModelGateway
-from paperlens_lab.real_paper_runner import RealPaperCase, run_real_paper_case
+from paperlens_lab.real_paper_runner import RealPaperCase, _selected_spans, run_real_paper_case
 
 
 class RealPaperRunnerTests(unittest.TestCase):
@@ -54,6 +54,54 @@ class RealPaperRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(result["memory"]["records_after_growth"], 3)
         saved = self.output_dir / "real_pdf_shaped.json"
         self.assertTrue(saved.exists())
+
+    def test_selected_spans_prefer_informative_middle_span(self):
+        spans = [
+            {"id": f"P0.S{idx}", "original": "fragment", "position": idx}
+            for idx in range(100)
+        ]
+        spans[50] = {
+            "id": "P5.S1",
+            "original": "of continuous representations z = (z1, ..., zn).",
+            "position": 50,
+        }
+        spans[53] = {
+            "id": "P5.S4",
+            "original": "We propose a method that improves F1 by 3.2 points in Table 2 under controlled evidence conditions.",
+            "position": 53,
+        }
+
+        selected = _selected_spans(spans)
+
+        middle = next(item for item in selected if item["position_label"] == "middle")
+        self.assertEqual(middle["id"], "P5.S4")
+
+    def test_fine_tuning_gate_does_not_use_fallback_only_failures(self):
+        source = PaperSource(
+            title="A Parse-Only Paper",
+            authors="A. Researcher",
+            source_label="arXiv:0000.00001",
+            pdf_url="https://arxiv.org/pdf/0000.00001",
+            text=self.long_pdf_text(),
+        )
+
+        result = run_real_paper_case(
+            RealPaperCase(
+                name="parse_only",
+                arxiv="0000.00001",
+                question="What does the selected span support?",
+                idea="Make a tiny experiment from the selected claim.",
+            ),
+            source=source,
+            use_model=False,
+            max_translate_spans=3,
+            max_reader_spans=90,
+            output_dir=self.output_dir,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["fine_tuning"]["recommendation"], "no")
+        self.assertIn("Model-backed validation was not enabled", result["fine_tuning"]["reason"])
 
     def fake_call(self, prompt: str, model_id: str, max_new_tokens: int):
         if '"translations"' in prompt:

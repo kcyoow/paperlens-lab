@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import Counter
+import re
 from typing import Any
 
 
@@ -45,7 +46,7 @@ def evaluate_translation(
         if marker not in joined:
             reasons.append(f"changed or dropped citation/table marker {marker}")
     for term in _technical_terms(source):
-        if term not in joined:
+        if not _term_preserved(term, joined):
             reasons.append(f"changed or dropped technical term {term}")
     if _has_negation_or_limit(source) and not _has_negation_or_limit(joined):
         reasons.append("lost negation, limitation, or result qualifier")
@@ -78,6 +79,10 @@ def evaluate_grounded_qa(
         if answer_data.get("confidence") == "high":
             reasons.append("unsupported question should not have high confidence")
     if source_evidence:
+        known_ids = {str(source_id) for source_id in source_evidence}
+        for source_id in ids:
+            if str(source_id) not in known_ids:
+                reasons.append(f"answer cites unknown evidence {source_id}")
         for item in evidence:
             if not isinstance(item, dict):
                 continue
@@ -267,7 +272,10 @@ def _has_negation_or_limit(text: str) -> bool:
 def _adds_unsupported_strength(source: str, output: str) -> bool:
     source_lower = source.lower()
     output_lower = output.lower()
-    return any(marker in output_lower and marker not in source_lower for marker in _strong_markers())
+    return any(
+        marker in output_lower and not _strong_marker_supported(source_lower, marker)
+        for marker in _strong_markers()
+    )
 
 
 def _mentions_strong_marker(text: str) -> bool:
@@ -277,6 +285,38 @@ def _mentions_strong_marker(text: str) -> bool:
 
 def _strong_markers() -> tuple[str, ...]:
     return ("state-of-the-art", "sota", "proves", "guarantees", "입증", "증명", "최고", "완벽")
+
+
+def _strong_marker_supported(source_lower: str, marker: str) -> bool:
+    if marker in source_lower:
+        return True
+    equivalents = {
+        "sota": ("state-of-the-art",),
+        "state-of-the-art": ("sota",),
+        "입증": ("prove", "proves", "proven", "demonstrate", "demonstrates", "demonstrated"),
+        "증명": ("prove", "proves", "proven", "demonstrate", "demonstrates", "demonstrated"),
+        "최고": ("best", "state-of-the-art", "sota", "top-performing", "top performing"),
+        "완벽": ("perfect", "perfectly", "guarantee", "guarantees"),
+    }
+    return any(_contains_phrase(source_lower, term) for term in equivalents.get(marker, ()))
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    if phrase.isascii() and phrase.replace("-", "").replace(" ", "").isalnum():
+        return re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text) is not None
+    return phrase in text
+
+
+def _term_preserved(term: str, output: str) -> bool:
+    if term in output:
+        return True
+    term_lower = term.lower()
+    output_lower = output.lower()
+    if term_lower in output_lower:
+        return True
+    if term_lower.endswith("s") and len(term_lower) > 3 and term_lower[:-1] in output_lower:
+        return True
+    return False
 
 
 def _flatten_text(value: Any) -> str:

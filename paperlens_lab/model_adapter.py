@@ -84,9 +84,14 @@ class ModelGateway:
         source_text: str,
         locale: str,
         use_model: bool = False,
+        evidence_items_override: list[dict[str, str]] | None = None,
     ) -> ModelResult:
         task = "grounded_qa"
-        evidence = _evidence_items(source_text or selected_span, selected_span=selected_span, span_id=span_id)
+        evidence = evidence_items_override or _evidence_items(
+            source_text or selected_span,
+            selected_span=selected_span,
+            span_id=span_id,
+        )
         prompt = qa_prompt(
             paper_title,
             span_id,
@@ -514,7 +519,11 @@ def _fallback_translate(source: str, locale: str) -> str:
     return f"[초안 번역] {source}{term_hint}"
 
 
-def _evidence_items(text: str, selected_span: str, span_id: str = "selected") -> list[dict[str, str]]:
+def evidence_map(text: str, selected_span: str, span_id: str = "selected") -> dict[str, str]:
+    return {item["source_id"]: item["text"] for item in evidence_items(text, selected_span, span_id=span_id)}
+
+
+def evidence_items(text: str, selected_span: str, span_id: str = "selected") -> list[dict[str, str]]:
     ranked = _top_sentences(text, limit=5)
     items = [{"source_id": span_id, "text": selected_span}]
     for sentence in ranked:
@@ -522,6 +531,10 @@ def _evidence_items(text: str, selected_span: str, span_id: str = "selected") ->
         if sentence["text"].strip() and sentence["text"].strip() != selected_span.strip():
             items.append({"source_id": sid, "text": sentence["text"]})
     return items[:6]
+
+
+def _evidence_items(text: str, selected_span: str, span_id: str = "selected") -> list[dict[str, str]]:
+    return evidence_items(text, selected_span, span_id=span_id)
 
 
 def _dataset_text(value: Any) -> str:

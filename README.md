@@ -103,9 +103,11 @@ Current verified snapshot:
 
 - Real arXiv/PDF papers: 3
 - Named papers: `1706.03762`, `2005.11401`, `2106.09685`
-- Real-paper evaluations: passed in the stored HF rerun summary
-- Model traces: all stored latest real-paper traces are `status=model`
-- Local selected-span browser/API proof: `1706.03762`, span `P3.S9`, evidence window `P3.S6-P3.S12`
+- Real-paper evaluations: 27/27 passed in `hf_three_papers_hard_informative_v2`
+- Model traces: 21/21 stored latest real-paper traces are `status=model`, with 0 fallbacks and 0 trace errors
+- Scope: first 8 parsed PDF pages per paper, capped to 220 reader spans for the hard validation run
+- Local selected-span browser/API proof: `1706.03762`, span `P3.S9`, evidence window `P3.S6-P3.S12`, quote ids `P3.S9` and `P3.S10`
+- Evidence consistency: saved QA citations are checked against stored source-evidence maps, and local quote ids must stay inside the source-index window
 - Fine-tuning decision from real failures: `no`; no repeated trainable failure cluster has been observed yet
 
 Useful validation commands:
@@ -119,10 +121,10 @@ PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
   --paper 1706.03762 \
   --paper 2005.11401 \
   --paper 2106.09685 \
-  --max-pdf-pages 6 \
-  --max-reader-spans 180 \
+  --max-pdf-pages 8 \
+  --max-reader-spans 220 \
   --max-translate-spans 3 \
-  --output-dir outputs/service_demo_validation/$(date +%F)/hf_three_papers_rerun
+  --output-dir outputs/service_demo_validation/$(date +%F)/hf_three_papers_hard_informative_v2
 ```
 
 ```bash

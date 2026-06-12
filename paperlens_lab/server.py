@@ -284,6 +284,8 @@ def _register_api(app: FastAPI) -> None:
         gateway = ModelGateway()
         window = evidence_window(payload.paper_id, payload.span_id) if payload.paper_id else None
         source_text = window["text"] if window else payload.source_text
+        window_evidence = _window_evidence_items(window)
+        allowed_source_ids = {item["source_id"] for item in window_evidence} if window_evidence else None
         result = gateway.answer_span(
             paper_title=payload.paper_title,
             span_id=payload.span_id,
@@ -293,8 +295,14 @@ def _register_api(app: FastAPI) -> None:
             source_text=source_text,
             locale=payload.locale,
             use_model=_should_use_model(payload.use_model),
+            evidence_items_override=window_evidence or None,
         )
-        answer_data, validation_error = _validated_answer_data(result.data, payload, evidence_text=source_text)
+        answer_data, validation_error = _validated_answer_data(
+            result.data,
+            payload,
+            evidence_text=source_text,
+            allowed_source_ids=allowed_source_ids,
+        )
         return {
             "role": "assistant",
             "content": answer_data.get("answer") or result.text or _fallback_answer(payload, question),
@@ -617,6 +625,7 @@ def _validated_answer_data(
     payload: AskInput,
     *,
     evidence_text: str = "",
+    allowed_source_ids: set[str] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     if not isinstance(data, dict):
         return _insufficient_answer(payload), "answer payload is not structured JSON"
@@ -629,10 +638,25 @@ def _validated_answer_data(
     for item in evidence:
         if not isinstance(item, dict):
             return _insufficient_answer(payload), "answer evidence is not structured"
+        source_id = str(item.get("source_id", ""))
+        if allowed_source_ids is not None and source_id not in allowed_source_ids:
+            return _insufficient_answer(payload), f"answer source id is outside the selected evidence window: {source_id}"
         quote = clean_text(str(item.get("quote", "")))
         if quote and quote not in source_pool:
             return _insufficient_answer(payload), f"answer quote is not present in source evidence: {item.get('source_id', '')}"
     return data, None
+
+
+def _window_evidence_items(window: dict[str, Any] | None) -> list[dict[str, str]]:
+    if not window:
+        return []
+    items = []
+    for span in window.get("spans", []):
+        span_id = str(span.get("span_id", ""))
+        text = clean_text(str(span.get("text", "")))
+        if span_id and text:
+            items.append({"source_id": span_id, "text": text})
+    return items
 
 
 def _public_evidence_window(window: dict[str, Any] | None) -> dict[str, Any] | None:
