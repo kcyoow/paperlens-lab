@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from .analysis import experiment_card, split_sentences, top_sentences
 from .ingest import PaperSource, build_source, clean_text
-from .model_adapter import DEFAULT_MODEL, generate_with_hf_inference
+from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
 from .ui import EXAMPLE_TEXT, build_demo
 
 
@@ -27,6 +28,8 @@ class PaperInput(BaseModel):
     arxiv_or_url: str = ""
     pasted_text: str = ""
     max_pdf_pages: int = Field(default=10, ge=1, le=32)
+    use_model: bool = False
+    max_translate_spans: int = Field(default=24, ge=1, le=48)
 
 
 class AskInput(BaseModel):
@@ -47,6 +50,22 @@ class ExperimentInput(BaseModel):
     source_text: str = ""
     idea: str = ""
     locale: str = "en"
+    use_model: bool = False
+
+
+class TranslationInput(BaseModel):
+    paper_title: str = "Untitled paper"
+    spans: list[dict[str, str]]
+    locale: str = "ko"
+    use_model: bool = False
+
+
+class GrowthInput(BaseModel):
+    paper_title: str = "Untitled paper"
+    selected_span: str = ""
+    paper_memory: list[dict[str, Any]] = Field(default_factory=list)
+    mini_lab_result: str = ""
+    locale: str = "ko"
     use_model: bool = False
 
 
@@ -88,6 +107,7 @@ def _register_api(app: FastAPI) -> None:
             "frontend_dir": str(FRONTEND_OUT_DIR),
             "gradio_path": "/gradio",
             "model": DEFAULT_MODEL,
+            "provider": DEFAULT_PROVIDER,
             "runtime": "react-fastapi-gradio-hybrid",
         }
 
@@ -110,7 +130,11 @@ def _register_api(app: FastAPI) -> None:
                 pasted_text=payload.pasted_text or EXAMPLE_TEXT,
                 max_pdf_pages=payload.max_pdf_pages,
             )
-            return paper_document_from_source(source)
+            return paper_document_from_source(
+                source,
+                use_model=_should_use_model(payload.use_model),
+                max_translate_spans=payload.max_translate_spans,
+            )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -119,6 +143,8 @@ def _register_api(app: FastAPI) -> None:
         pdf: UploadFile = File(...),
         max_pdf_pages: int = Form(10),
         arxiv_or_url: str = Form(""),
+        use_model: bool = Form(False),
+        max_translate_spans: int = Form(24),
     ) -> dict[str, Any]:
         if not pdf.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Upload a PDF file.")
@@ -136,7 +162,29 @@ def _register_api(app: FastAPI) -> None:
                 )
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return paper_document_from_source(source)
+        return paper_document_from_source(
+            source,
+            use_model=_should_use_model(use_model),
+            max_translate_spans=max(1, min(max_translate_spans, 48)),
+        )
+
+    @app.post("/api/translate")
+    def translate_spans(payload: TranslationInput) -> dict[str, Any]:
+        gateway = ModelGateway()
+        result = gateway.translate_spans(
+            payload.paper_title,
+            payload.spans,
+            locale=payload.locale,
+            use_model=_should_use_model(payload.use_model),
+        )
+        return {
+            "translations": result.data.get("translations", []),
+            "notes": result.data.get("notes", []),
+            "model": result.model,
+            "provider": result.provider,
+            "traceId": result.trace_id,
+            "error": result.error,
+        }
 
     @app.post("/api/ask")
     def ask_question(payload: AskInput) -> dict[str, Any]:
@@ -148,18 +196,29 @@ def _register_api(app: FastAPI) -> None:
                 else "선택한 문장을 논문 근거에 맞춰 설명해줘."
             )
 
-        prompt = _ask_prompt(payload, question)
-        model_text = generate_with_hf_inference(prompt) if payload.use_model else None
-        answer = model_text or _fallback_answer(payload, question)
+        gateway = ModelGateway()
+        result = gateway.answer_span(
+            paper_title=payload.paper_title,
+            span_id=payload.span_id,
+            selected_span=payload.original,
+            translated_span=payload.translated,
+            question=question,
+            source_text=payload.source_text,
+            locale=payload.locale,
+            use_model=_should_use_model(payload.use_model),
+        )
         return {
             "role": "assistant",
-            "content": answer,
-            "supportSpanIds": [payload.span_id],
-            "model": DEFAULT_MODEL if payload.use_model else "fallback-extractive",
+            "content": result.text or _fallback_answer(payload, question),
+            "supportSpanIds": _support_ids(result.data, payload.span_id),
+            "model": result.model,
+            "provider": result.provider,
+            "traceId": result.trace_id,
+            "error": result.error,
         }
 
     @app.post("/api/experiment")
-    def build_experiment(payload: ExperimentInput) -> dict[str, str]:
+    def build_experiment(payload: ExperimentInput) -> dict[str, Any]:
         source_text = clean_text(payload.source_text or payload.selected_span)
         idea = clean_text(payload.idea) or (
             "Test whether the selected paper idea improves a small measurable behavior."
@@ -170,8 +229,48 @@ def _register_api(app: FastAPI) -> None:
             source_label="frontend-reader",
             text=f"{payload.selected_span}\n\n{source_text}",
         )
-        card, starter = experiment_card(source, idea, "Research prototype builder", payload.use_model)
-        return {"card": card, "starter": starter}
+        gateway = ModelGateway()
+        result = gateway.experiment_spec(
+            paper_title=payload.paper_title,
+            selected_span=payload.selected_span,
+            translated_span=payload.translated_span,
+            source_text=source_text,
+            idea=idea,
+            locale=payload.locale,
+            use_model=_should_use_model(payload.use_model),
+        )
+        fallback_card, starter = experiment_card(source, idea, "Research prototype builder", use_model=False)
+        card = result.text if result.text else fallback_card
+        return {
+            "card": card,
+            "starter": starter,
+            "spec": result.data,
+            "model": result.model,
+            "provider": result.provider,
+            "traceId": result.trace_id,
+            "error": result.error,
+        }
+
+    @app.post("/api/growth")
+    def growth_ideas(payload: GrowthInput) -> dict[str, Any]:
+        gateway = ModelGateway()
+        result = gateway.growth_ideas(
+            paper_title=payload.paper_title,
+            paper_memory=payload.paper_memory,
+            mini_lab_result=payload.mini_lab_result,
+            selected_span=payload.selected_span,
+            locale=payload.locale,
+            use_model=_should_use_model(payload.use_model),
+        )
+        return {
+            "ideas": result.data.get("ideas", []),
+            "fineTuningSignal": result.data.get("fine_tuning_signal", "none"),
+            "reason": result.data.get("reason", ""),
+            "model": result.model,
+            "provider": result.provider,
+            "traceId": result.trace_id,
+            "error": result.error,
+        }
 
 
 def _register_frontend_routes(app: FastAPI) -> None:
@@ -247,13 +346,19 @@ def _missing_frontend_html() -> str:
     """
 
 
-def paper_document_from_source(source: PaperSource) -> dict[str, Any]:
+def paper_document_from_source(
+    source: PaperSource,
+    *,
+    use_model: bool = False,
+    max_translate_spans: int = 24,
+) -> dict[str, Any]:
     sentences = split_sentences(source.text)
     if not sentences:
         sentences = [source.text]
     sentences = sentences[:48]
 
     section_count = min(5, max(1, (len(sentences) + 5) // 6))
+    section_plans = []
     sections = []
     cursor = 0
     for section_index in range(section_count):
@@ -261,11 +366,22 @@ def paper_document_from_source(source: PaperSource) -> dict[str, Any]:
         take = max(1, (remaining + section_count - section_index - 1) // (section_count - section_index))
         section_sentences = sentences[cursor : cursor + take]
         cursor += take
+        section_plans.append((section_index, section_sentences))
+
+    span_sources = [
+        {"span_id": _span_id(section_index, span_index + 1), "text": sentence}
+        for section_index, section_sentences in section_plans
+        for span_index, sentence in enumerate(section_sentences)
+    ][:max_translate_spans]
+    translation_map = _translation_map(source.title, span_sources, use_model)
+
+    for section_index, section_sentences in section_plans:
         paragraph_spans = [
             {
-                "id": f"P{section_index}.S{span_index + 1}",
+                "id": _span_id(section_index, span_index + 1),
                 "original": sentence,
-                "translated": _translation_placeholder(sentence),
+                "translated": translation_map.get(_span_id(section_index, span_index + 1))
+                or _translation_placeholder(sentence),
             }
             for span_index, sentence in enumerate(section_sentences)
         ]
@@ -285,11 +401,40 @@ def paper_document_from_source(source: PaperSource) -> dict[str, Any]:
         "authors": [item.strip() for item in source.authors.split(",") if item.strip()] or ["Unknown authors"],
         "source": source.source_label,
         "sections": sections,
+        "model": DEFAULT_MODEL if use_model else "fallback-extractive",
+        "provider": DEFAULT_PROVIDER if use_model else "fallback",
     }
 
 
 def _translation_placeholder(sentence: str) -> str:
-    return f"[Korean draft pending] {sentence}"
+    return f"[초안 번역] {sentence}"
+
+
+def _translation_map(title: str, spans: list[dict[str, str]], use_model: bool) -> dict[str, str]:
+    if not spans:
+        return {}
+    result = ModelGateway().translate_spans(title, spans, locale="ko", use_model=use_model)
+    return {
+        item.get("span_id", ""): item.get("translation", "")
+        for item in result.data.get("translations", [])
+        if item.get("span_id")
+    }
+
+
+def _span_id(section_index: int, span_index: int) -> str:
+    return f"P{section_index}.S{span_index}"
+
+
+def _should_use_model(requested: bool) -> bool:
+    return requested or os.getenv("PAPERLENS_FORCE_MODEL", "").lower() in {"1", "true", "yes"}
+
+
+def _support_ids(data: dict[str, Any], fallback_span_id: str) -> list[str]:
+    evidence = data.get("evidence", [])
+    ids = [item.get("source_id") for item in evidence if isinstance(item, dict) and item.get("source_id")]
+    support_span_ids = data.get("support_span_ids", [])
+    ids.extend(item for item in support_span_ids if isinstance(item, str))
+    return list(dict.fromkeys(ids or [fallback_span_id]))
 
 
 def _ask_prompt(payload: AskInput, question: str) -> str:

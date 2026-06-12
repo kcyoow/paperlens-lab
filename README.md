@@ -55,9 +55,22 @@ The app works in fallback mode without external credentials. For model-backed ou
 ```bash
 HF_TOKEN=...
 PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507
+PAPERLENS_PROVIDER=hf
 ```
 
-The default model target is under the Build Small Hackathon's 32B limit.
+The current Hugging Face inference smoke path uses `Qwen/Qwen3-4B-Instruct-2507`
+because it is small, under the Build Small Hackathon's 32B limit, and currently
+responds through the authenticated HF Inference path. Larger <=32B candidates
+such as Mistral Small, Magistral Small, Granite, or Gemma 4 remain Modal/vLLM
+quality-booster candidates.
+
+Useful runtime switches:
+
+- `PAPERLENS_PROVIDER=fallback|hf|modal`
+- `PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507`
+- `PAPERLENS_QUALITY_MODEL=mistralai/Mistral-Small-3.2-24B-Instruct-2506`
+- `PAPERLENS_TRACE_PATH=outputs/agent_traces.jsonl`
+- `NEXT_PUBLIC_PAPERLENS_USE_MODEL=1` for the exported React frontend
 
 ## Local Run
 

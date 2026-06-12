@@ -50,4 +50,8 @@ export interface QAMessage {
   isExternalKnowledge?: boolean;
   isBackendGenerated?: boolean;
   isLoading?: boolean;
+  model?: string;
+  provider?: string;
+  traceId?: string;
+  error?: string | null;
 }

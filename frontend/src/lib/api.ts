@@ -1,16 +1,42 @@
 import { PaperDocument, QAMessage, Span } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
+const USE_MODEL = ["1", "true", "yes"].includes(
+  (process.env.NEXT_PUBLIC_PAPERLENS_USE_MODEL ?? "").toLowerCase(),
+);
 
 export interface PaperLoadInput {
   arxiv_or_url?: string;
   pasted_text?: string;
   max_pdf_pages?: number;
+  use_model?: boolean;
+  max_translate_spans?: number;
 }
 
 export interface ExperimentResult {
   card: string;
   starter: string;
+  spec?: Record<string, unknown>;
+  model?: string;
+  provider?: string;
+  traceId?: string;
+  error?: string | null;
+}
+
+export interface GrowthResult {
+  ideas: Array<{
+    idea: string;
+    source_evidence?: string[];
+    novelty_angle?: string;
+    testable_next_step?: string;
+    risk?: string;
+  }>;
+  fineTuningSignal: string;
+  reason: string;
+  model?: string;
+  provider?: string;
+  traceId?: string;
+  error?: string | null;
 }
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -35,6 +61,8 @@ export async function loadPaper(input: PaperLoadInput): Promise<PaperDocument> {
       arxiv_or_url: input.arxiv_or_url ?? "",
       pasted_text: input.pasted_text ?? "",
       max_pdf_pages: input.max_pdf_pages ?? 10,
+      use_model: input.use_model ?? USE_MODEL,
+      max_translate_spans: input.max_translate_spans ?? 24,
     }),
   });
   return parseJson<PaperDocument>(response);
@@ -44,6 +72,8 @@ export async function uploadPaper(file: File, maxPdfPages = 10): Promise<PaperDo
   const formData = new FormData();
   formData.set("pdf", file);
   formData.set("max_pdf_pages", String(maxPdfPages));
+  formData.set("use_model", String(USE_MODEL));
+  formData.set("max_translate_spans", "24");
 
   const response = await fetch(`${API_BASE}/api/paper/upload`, {
     method: "POST",
@@ -70,13 +100,17 @@ export async function askAboutSpan(params: {
       paper_title: params.paperTitle,
       source_text: params.sourceText,
       locale: params.locale,
-      use_model: false,
+      use_model: USE_MODEL,
     }),
   });
   const body = await parseJson<{
     role: "assistant";
     content: string;
     supportSpanIds?: string[];
+    model?: string;
+    provider?: string;
+    traceId?: string;
+    error?: string | null;
   }>(response);
   return {
     id: `qa-${Date.now()}`,
@@ -84,6 +118,10 @@ export async function askAboutSpan(params: {
     content: body.content,
     supportSpanIds: body.supportSpanIds,
     isBackendGenerated: true,
+    model: body.model,
+    provider: body.provider,
+    traceId: body.traceId,
+    error: body.error,
   };
 }
 
@@ -103,10 +141,32 @@ export async function buildExperiment(params: {
       source_text: params.sourceText,
       idea: params.span.original,
       locale: params.locale,
-      use_model: false,
+      use_model: USE_MODEL,
     }),
   });
   return parseJson<ExperimentResult>(response);
+}
+
+export async function buildGrowthIdeas(params: {
+  span: Span;
+  paperTitle: string;
+  paperMemory: Array<Record<string, unknown>>;
+  miniLabResult: string;
+  locale: "en" | "ko";
+}): Promise<GrowthResult> {
+  const response = await fetch(`${API_BASE}/api/growth`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      paper_title: params.paperTitle,
+      selected_span: params.span.original,
+      paper_memory: params.paperMemory,
+      mini_lab_result: params.miniLabResult,
+      locale: params.locale,
+      use_model: USE_MODEL,
+    }),
+  });
+  return parseJson<GrowthResult>(response);
 }
 
 export function savePaperToSession(paper: PaperDocument) {
