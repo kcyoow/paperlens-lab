@@ -5,6 +5,7 @@ from paperlens_lab.scenario_eval import (
     evaluate_experiment_spec,
     evaluate_grounded_qa,
     evaluate_growth_ideas,
+    evaluate_starter_code,
     evaluate_translation,
     fine_tuning_gate,
 )
@@ -196,6 +197,30 @@ class ScenarioEvalTests(unittest.TestCase):
             }
         )
         self.assertTrue(result.passed, result.reasons)
+
+    def test_starter_code_smoke_requires_runnable_run_rows(self):
+        code = """
+def baseline(example):
+    return {"prediction": "base"}
+
+def paper_inspired(example):
+    return {"prediction": "proto"}
+
+def score(output, expected):
+    return 1.0
+
+def run():
+    return [{"baseline_score": 0.0, "prototype_score": 1.0, "metric": "accuracy", "failure_condition": "no gain"}]
+"""
+        result = evaluate_starter_code(code)
+
+        self.assertTrue(result.passed, result.reasons)
+
+    def test_starter_code_smoke_rejects_missing_run_contract(self):
+        result = evaluate_starter_code("def baseline(example):\n    return {}\n")
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("run()" in reason for reason in result.reasons))
 
     def test_experiment_spec_rejects_large_setup_without_toy_fallback(self):
         result = evaluate_experiment_spec(

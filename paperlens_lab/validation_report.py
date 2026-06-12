@@ -6,10 +6,23 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .scenario_eval import source_contains_quote
+from .scenario_eval import evaluate_experiment_spec, evaluate_starter_code, source_contains_quote
 
 
 DEFAULT_VALIDATION_ROOT = Path("outputs") / "service_demo_validation"
+REQUIRED_REAL_PAPER_EVALS = {
+    "pdf_parse_and_reader_spans",
+    "translation_fidelity",
+    "grounded_qa",
+    "adversarial_lost_in_the_middle",
+    "experiment_spec",
+    "starter_code_smoke",
+    "growth_ideas",
+    "research_growth_iteration",
+    "model_backing",
+}
+MIN_REAL_PAPER_SOURCE_CHARS = 6000
+MIN_REAL_PAPER_READER_SPANS = 30
 
 
 def validation_root() -> Path:
@@ -42,15 +55,19 @@ def build_validation_summary(root: Path | None = None) -> dict[str, Any]:
         and real_paper_run.get("evaluationTotal", 0) > 0
         and real_paper_run.get("evaluationPassed") == real_paper_run.get("evaluationTotal")
         and real_paper_run.get("evidenceConsistencyPassed")
+        and real_paper_run.get("artifactContractPassed")
         and _adversarial_litm_passed(real_paper_run)
         and real_paper_run.get("growthIterationPassed")
+        and real_paper_run.get("starterCodePassed")
         and trace_summary
+        and trace_summary.get("traceIdsPassed")
         and trace_summary.get("total", 0) > 0
         and trace_summary.get("modelCount") == trace_summary.get("total")
         and trace_summary.get("fallbackCount") == 0
         and trace_summary.get("errorCount") == 0
         and local_demo
         and local_demo.get("sourceIndexConsistent", True)
+        and local_demo.get("quotesInSourceIndex")
         and not local_demo.get("usedFallback")
         and not local_demo.get("translationUsedFallback")
     )
@@ -79,10 +96,13 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
         return None
 
     _, _, path, body, evidence_issues = max(candidates, key=lambda item: item[0])
+    artifact_issues = _real_paper_artifact_issues(body)
     if evidence_issues:
         warnings.append(
             f"real-paper summary evidence consistency needs rerun: {len(evidence_issues)} issue(s)"
         )
+    if artifact_issues:
+        warnings.append(f"real-paper artifact contract needs rerun: {len(artifact_issues)} issue(s)")
     runs = body.get("runs", []) if isinstance(body.get("runs"), list) else []
     papers = []
     evaluation_total = 0
@@ -92,6 +112,8 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
         source = run.get("source", {}) if isinstance(run, dict) else {}
         reader = run.get("reader", {}) if isinstance(run, dict) else {}
         memory = run.get("memory", {}) if isinstance(run, dict) else {}
+        eval_names = {str(item.get("name", "")) for item in evaluations if isinstance(item, dict)}
+        missing_required = sorted(REQUIRED_REAL_PAPER_EVALS - eval_names)
         growth_iteration = (((run.get("model_outputs") or {}).get("growth_iteration") or {}).get("data") or {})
         growth_iteration_evidence = _growth_iteration_evidence(growth_iteration)
         growth_iteration_idea_evidence = _growth_iteration_idea_evidence(growth_iteration)
@@ -100,6 +122,17 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
             for item in evaluations
             if isinstance(item, dict)
         )
+        starter_code_eval_passed = any(
+            item.get("name") == "starter_code_smoke" and item.get("passed")
+            for item in evaluations
+            if isinstance(item, dict)
+        )
+        starter_code = str((((run.get("model_outputs") or {}).get("starter_code") or {}).get("code") or ""))
+        starter_code_eval = evaluate_starter_code(starter_code)
+        starter_code_passed = bool(starter_code_eval_passed and starter_code_eval.passed)
+        experiment_data = (((run.get("model_outputs") or {}).get("experiment") or {}).get("data") or {})
+        experiment_spec_eval = evaluate_experiment_spec(experiment_data if isinstance(experiment_data, dict) else {})
+        source_contract_issues = _real_paper_source_contract_issues(source, reader)
         passed_here = sum(1 for item in evaluations if item.get("passed"))
         evaluation_total += len(evaluations)
         evaluation_passed += passed_here
@@ -118,6 +151,10 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
                 "readerSpans": reader.get("visible_span_count", 0),
                 "adversarialLitm": reader.get("adversarial_litm", {}),
                 "selectedSpanPositions": reader.get("selected_span_positions", []),
+                "requiredEvalMissing": missing_required,
+                "requiredEvalPassed": not missing_required,
+                "sourceContractIssues": source_contract_issues,
+                "sourceContractPassed": not source_contract_issues,
                 "evaluationsPassed": passed_here,
                 "evaluationsTotal": len(evaluations),
                 "evaluations": [
@@ -130,6 +167,11 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
                 ],
                 "memoryRecordsAfterGrowth": memory.get("records_after_growth", 0),
                 "memoryRecordsBeforeGrowthIteration": memory.get("records_before_growth_iteration", 0),
+                "starterCodePassed": starter_code_passed,
+                "starterCodeRechecked": starter_code_eval.passed,
+                "starterCodeReasons": starter_code_eval.reasons,
+                "experimentSpecRechecked": experiment_spec_eval.passed,
+                "experimentSpecReasons": experiment_spec_eval.reasons,
                 "growthIterationPassed": growth_iteration_eval_passed,
                 "growthIterationEvidence": growth_iteration_evidence,
                 "growthIterationIdeaEvidence": growth_iteration_idea_evidence,
@@ -147,7 +189,11 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
         "evaluationTotal": evaluation_total,
         "evidenceConsistencyPassed": not evidence_issues,
         "evidenceConsistencyIssues": evidence_issues[:12],
+        "artifactContractPassed": not artifact_issues,
+        "artifactContractIssues": artifact_issues[:12],
         "growthIterationPassed": _growth_iteration_passed_for_papers(papers),
+        "starterCodePassed": all(paper.get("starterCodePassed") for paper in papers) if papers else False,
+        "requiredTraceIds": _required_trace_ids_from_summary(body),
         "fineTuningRecommendation": fine_tuning.get("recommendation", "unknown"),
         "fineTuningReason": fine_tuning.get("reason", ""),
         "repeatedFailures": fine_tuning.get("repeated_failures", []),
@@ -247,7 +293,36 @@ def _trace_summary_for_run(
     model_counts: Counter[str] = Counter()
     error_count = 0
     total = 0
-    for record in _read_jsonl(trace_paths[0]):
+    trace_records = [record for record in _read_jsonl(trace_paths[0]) if isinstance(record, dict)]
+    records_by_id = {
+        str(record.get("trace_id")): record
+        for record in trace_records
+        if record.get("trace_id")
+    }
+    required_trace_ids = real_paper_run.get("requiredTraceIds", []) if real_paper_run else []
+    trace_id_issues: list[str] = []
+    for expected in required_trace_ids:
+        if not isinstance(expected, dict):
+            continue
+        trace_id = str(expected.get("trace_id") or "")
+        task = str(expected.get("task") or "")
+        if not trace_id:
+            trace_id_issues.append(f"{expected.get('paper', 'unknown')}:{task} missing trace_id")
+            continue
+        record = records_by_id.get(trace_id)
+        if not record:
+            trace_id_issues.append(f"{expected.get('paper', 'unknown')}:{task} trace {trace_id} missing from JSONL")
+            continue
+        if record.get("task") != task:
+            trace_id_issues.append(f"{trace_id} task mismatch: expected {task}, saw {record.get('task')}")
+        if record.get("status") != "model":
+            trace_id_issues.append(f"{trace_id} is not model-backed")
+        if record.get("error"):
+            trace_id_issues.append(f"{trace_id} has error")
+    if trace_id_issues:
+        warnings.append(f"real-paper trace ids need rerun: {len(trace_id_issues)} issue(s)")
+
+    for record in trace_records:
         if not isinstance(record, dict) or not record.get("task"):
             continue
         total += 1
@@ -267,6 +342,9 @@ def _trace_summary_for_run(
         "byTask": dict(sorted(task_counts.items())),
         "byProvider": dict(sorted(provider_counts.items())),
         "byModel": dict(sorted(model_counts.items())),
+        "traceIdsPassed": not trace_id_issues,
+        "traceIdIssues": trace_id_issues[:12],
+        "requiredTraceIdCount": len(required_trace_ids),
     }
 
 
@@ -307,6 +385,34 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
     unknown_evidence_ids = sorted(
         source_id for source_id in set(evidence_ids) if allowed_evidence_ids and source_id not in allowed_evidence_ids
     )
+    source_text_by_span_id = _source_index_text_by_span_id(source_index, allowed_evidence_ids)
+    bad_quote_ids = sorted(
+        {
+            str(item.get("source_id", ""))
+            for item in evidence
+            if isinstance(item, dict)
+            and item.get("source_id")
+            and str(item.get("source_id", "")) in source_text_by_span_id
+            and str(item.get("quote", "")).strip()
+            and not source_contains_quote(
+                source_text_by_span_id[str(item.get("source_id", ""))],
+                str(item.get("quote", "")).strip(),
+            )
+        }
+    )
+    missing_quote_text_ids = sorted(
+        {
+            str(item.get("source_id", ""))
+            for item in evidence
+            if isinstance(item, dict)
+            and item.get("source_id")
+            and str(item.get("source_id", "")) in allowed_evidence_ids
+            and str(item.get("source_id", "")) not in source_text_by_span_id
+        }
+    )
+    if evidence_window.get("paperId") and not source_index:
+        source_index_consistent = False
+        warnings.append("local selected-span source index is missing; rerun local browser/API proof")
     if source_index_hash and evidence_window.get("sourceHash") and source_index_hash != evidence_window.get("sourceHash"):
         source_index_consistent = False
         warnings.append(
@@ -322,6 +428,12 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         warnings.append(
             "local selected-span answer cites evidence outside the source-index window; rerun local browser/API proof"
         )
+    if bad_quote_ids or missing_quote_text_ids:
+        source_index_consistent = False
+        warnings.append(
+            "local selected-span answer quote is not verifiable in the source-index window; rerun local browser/API proof"
+        )
+    quotes_in_source_index = bool(evidence) and not unknown_evidence_ids and not bad_quote_ids and not missing_quote_text_ids
     return {
         "askPath": str(ask_paths[0]),
         "translatePath": str(translate_paths[0]) if translate_paths else "",
@@ -337,7 +449,10 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         "neighborSpans": evidence_window.get("spans", []),
         "evidenceIds": evidence_ids,
         "unknownEvidenceIds": unknown_evidence_ids,
+        "badQuoteIds": bad_quote_ids,
+        "missingQuoteTextIds": missing_quote_text_ids,
         "quoteIdsWithinWindow": not unknown_evidence_ids,
+        "quotesInSourceIndex": quotes_in_source_index,
         "quoteCount": len(evidence),
         "confidence": ask.get("confidence", ""),
         "needsMoreContext": bool(ask.get("needsMoreContext")),
@@ -407,6 +522,78 @@ def _real_paper_evidence_issues(body: dict[str, Any]) -> list[str]:
     return issues
 
 
+def _real_paper_artifact_issues(body: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    runs = body.get("runs", []) if isinstance(body.get("runs"), list) else []
+    for run in runs:
+        if not isinstance(run, dict):
+            issues.append("summary contains a non-object paper run")
+            continue
+        case_name = (run.get("case") or {}).get("name", "unknown")
+        evaluations = run.get("evaluations", []) if isinstance(run.get("evaluations"), list) else []
+        eval_names = {str(item.get("name", "")) for item in evaluations if isinstance(item, dict)}
+        for name in sorted(REQUIRED_REAL_PAPER_EVALS - eval_names):
+            issues.append(f"{case_name} missing required evaluation {name}")
+        for issue in _real_paper_source_contract_issues(
+            run.get("source", {}) if isinstance(run.get("source"), dict) else {},
+            run.get("reader", {}) if isinstance(run.get("reader"), dict) else {},
+        ):
+            issues.append(f"{case_name} {issue}")
+        starter_code = str((((run.get("model_outputs") or {}).get("starter_code") or {}).get("code") or ""))
+        starter_eval = evaluate_starter_code(starter_code)
+        if not starter_eval.passed:
+            issues.append(f"{case_name} starter code does not rerun: {', '.join(starter_eval.reasons)}")
+        experiment_data = (((run.get("model_outputs") or {}).get("experiment") or {}).get("data") or {})
+        experiment_eval = evaluate_experiment_spec(experiment_data if isinstance(experiment_data, dict) else {})
+        if not experiment_eval.passed:
+            issues.append(f"{case_name} experiment spec does not revalidate: {', '.join(experiment_eval.reasons)}")
+    return issues
+
+
+def _real_paper_source_contract_issues(source: dict[str, Any], reader: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    pdf_url = str(source.get("pdf_url") or "")
+    page_markers = int(source.get("page_marker_count") or 0)
+    source_chars = int(source.get("text_chars") or 0)
+    reader_spans = int(reader.get("visible_span_count") or 0)
+    if not pdf_url.startswith(("http://", "https://")) or "pdf" not in pdf_url.lower():
+        issues.append("is not bound to a PDF URL")
+    if page_markers < 1:
+        issues.append("has no parsed PDF page markers")
+    if source_chars < MIN_REAL_PAPER_SOURCE_CHARS:
+        issues.append(f"has too little source text ({source_chars} chars)")
+    if reader_spans < MIN_REAL_PAPER_READER_SPANS:
+        issues.append(f"has too few reader spans ({reader_spans})")
+    return issues
+
+
+def _required_trace_ids_from_summary(body: dict[str, Any]) -> list[dict[str, str]]:
+    required: list[dict[str, str]] = []
+    runs = body.get("runs", []) if isinstance(body.get("runs"), list) else []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        paper = str((run.get("case") or {}).get("name", "unknown"))
+        outputs = run.get("model_outputs") if isinstance(run.get("model_outputs"), dict) else {}
+        _append_trace_id(required, outputs.get("translation"), "translation", paper)
+        for qa in outputs.get("qa") or []:
+            if isinstance(qa, dict):
+                _append_trace_id(required, qa.get("result"), "grounded_qa", paper)
+        adversarial = outputs.get("adversarial_litm") if isinstance(outputs.get("adversarial_litm"), dict) else {}
+        _append_trace_id(required, adversarial.get("result"), "adversarial_grounded_qa", paper)
+        _append_trace_id(required, outputs.get("experiment"), "experiment_spec", paper)
+        _append_trace_id(required, outputs.get("growth"), "research_growth", paper)
+        _append_trace_id(required, outputs.get("growth_iteration"), "research_growth", paper)
+    return required
+
+
+def _append_trace_id(required: list[dict[str, str]], result: Any, task: str, paper: str) -> None:
+    if not isinstance(result, dict):
+        required.append({"paper": paper, "task": task, "trace_id": ""})
+        return
+    required.append({"paper": paper, "task": task, "trace_id": str(result.get("trace_id") or "")})
+
+
 def _memory_summary_for_run(
     root: Path,
     real_paper_run: dict[str, Any] | None,
@@ -446,6 +633,23 @@ def _source_index_for_local_demo(root: Path, evidence_window: dict[str, Any]) ->
         if body and body.get("paper_id") == paper_id and isinstance(body.get("spans"), list):
             return body
     return None
+
+
+def _source_index_text_by_span_id(
+    source_index: dict[str, Any] | None,
+    allowed_evidence_ids: set[str],
+) -> dict[str, str]:
+    if not source_index or not isinstance(source_index.get("spans"), list):
+        return {}
+    text_by_id: dict[str, str] = {}
+    for span in source_index.get("spans", []):
+        if not isinstance(span, dict):
+            continue
+        span_id = str(span.get("span_id") or span.get("spanId") or "")
+        text = str(span.get("text") or "")
+        if span_id and span_id in allowed_evidence_ids and text:
+            text_by_id[span_id] = text
+    return text_by_id
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

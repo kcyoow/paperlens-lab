@@ -133,6 +133,8 @@ Evidence:
 
 Rules:
 - The dataset must be a public, toy, hand-built, or fallback dataset a student can use in 30-60 minutes.
+- Prefer 5-20 hand-built examples from the selected span or a tiny built-in list. Do not require training, GPUs, WMT, full benchmark downloads, multi-epoch optimization, or large framework setup.
+- Starter code should be dependency-light and executable as a smoke test before any optional library-specific upgrade.
 - The failure_condition must explicitly name the metric and say what metric outcome would falsify the mini-lab.
 - The expected_result must be modest; do not promise that the paper's original delta will reproduce.
 - The ablation should isolate one variable.

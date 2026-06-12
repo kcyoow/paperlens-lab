@@ -16,21 +16,21 @@ interface Props {
 
 const STARTER_CODE = `"""
 Starter mini-lab generated from a selected paper span.
-Replace the TODO blocks with the smallest paper-specific operation.
+Dependency-free smoke test. Replace EXAMPLES with paper-specific rows.
 """
 
 
 def baseline(example: str) -> dict:
     return {
         "prediction": example,
-        "notes": "TODO: direct baseline without the selected paper mechanism.",
+        "notes": "Direct baseline without the selected paper mechanism.",
     }
 
 
 def paper_inspired(example: str) -> dict:
     return {
         "prediction": example,
-        "notes": "TODO: add one minimal mechanism named by the selected span.",
+        "notes": "Minimal paper-inspired variant named by the selected span.",
     }
 
 

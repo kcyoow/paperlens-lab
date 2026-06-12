@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .analysis import starter_code_from_spec
 from .ingest import PaperSource, build_source
 from .memory_store import append_memory, load_memories, paper_key
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, ModelGateway, evidence_map
@@ -15,6 +16,7 @@ from .scenario_eval import (
     evaluate_experiment_spec,
     evaluate_grounded_qa,
     evaluate_growth_ideas,
+    evaluate_starter_code,
     evaluate_translation,
     fine_tuning_gate,
 )
@@ -135,6 +137,11 @@ def run_real_paper_case(
         locale=locale,
         use_model=use_model,
     )
+    starter_code = starter_code_from_spec(
+        document["title"],
+        experiment.data,
+        selected_span=selected[len(selected) // 2]["original"] if selected else "",
+    )
 
     append_memory(
         paper_id,
@@ -193,6 +200,7 @@ def run_real_paper_case(
             translations.data,
             qa_runs,
             experiment.data,
+            starter_code,
             growth.data,
             memories,
             litm_probe,
@@ -237,6 +245,7 @@ def run_real_paper_case(
             "qa": qa_runs,
             "adversarial_litm": litm_probe,
             "experiment": _public_result(experiment),
+            "starter_code": {"task": "starter_code", "code": starter_code},
             "growth": _public_result(growth),
             "growth_iteration": _public_result(growth_iteration),
         },
@@ -602,6 +611,7 @@ def _evaluate_run(
     translation_data: dict[str, Any],
     qa_runs: list[dict[str, Any]],
     experiment_data: dict[str, Any],
+    starter_code: str,
     growth_data: dict[str, Any],
     memories: list[dict[str, Any]],
     litm_probe: dict[str, Any] | None = None,
@@ -631,6 +641,7 @@ def _evaluate_run(
     if litm_probe:
         evals.append(evaluate_lost_in_the_middle(litm_probe))
     evals.append(evaluate_experiment_spec(experiment_data))
+    evals.append(evaluate_starter_code(starter_code))
     known_ids = {item.get("id", "") for item in memories}
     known_ids.update({"paper:selected-middle", "run:r1"})
     evals.append(evaluate_growth_ideas(growth_data, known_evidence_ids=known_ids, require_multiple_sources=True))

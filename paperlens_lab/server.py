@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .analysis import experiment_card, split_sentences, top_sentences
+from .analysis import experiment_card, split_sentences, starter_code_from_spec, top_sentences
 from .ingest import PaperSource, build_source, clean_text
 from .memory_store import append_memory, load_memories, paper_key
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
@@ -341,8 +341,13 @@ def _register_api(app: FastAPI) -> None:
             locale=payload.locale,
             use_model=_should_use_model(payload.use_model),
         )
-        fallback_card, starter = experiment_card(source, idea, "Research prototype builder", use_model=False)
+        fallback_card, _ = experiment_card(source, idea, "Research prototype builder", use_model=False)
         card = result.text if result.text else fallback_card
+        starter = starter_code_from_spec(
+            payload.paper_title,
+            result.data,
+            selected_span=payload.selected_span,
+        )
         return {
             "card": card,
             "starter": starter,

@@ -1,9 +1,63 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from collections import Counter
 import re
 from typing import Any
+
+
+HEAVY_EXPERIMENT_TERMS = (
+    "wmt14",
+    "full benchmark",
+    "train for",
+    "epochs",
+    "epoch",
+    "pytorch",
+    "tensorflow",
+    "sacrebleu",
+    "faiss",
+    "download and load",
+    "fine-tune",
+    "large dataset",
+    "cuda",
+    "p100",
+    "v100",
+    "a100",
+    "h100",
+    "tpu",
+    "multi-gpu",
+    "multi gpu",
+    "multi-day",
+    "multi day",
+    "full training run",
+    "end-to-end training",
+    "distributed training",
+    "large-scale",
+    "large scale",
+)
+
+HEAVY_EXPERIMENT_BLOCKERS = (
+    "wmt14",
+    "full benchmark",
+    "train for",
+    "epochs",
+    "epoch",
+    "fine-tune",
+    "cuda",
+    "p100",
+    "v100",
+    "a100",
+    "h100",
+    "tpu",
+    "multi-gpu",
+    "multi gpu",
+    "multi-day",
+    "multi day",
+    "full training run",
+    "end-to-end training",
+    "distributed training",
+)
 
 
 @dataclass
@@ -114,6 +168,12 @@ def evaluate_experiment_spec(spec: dict[str, Any]) -> EvalResult:
     if any(term in spec_text.lower() for term in ("8xa100", "a100", "gpu cluster", "proprietary dataset")):
         if not any(term in dataset_text.lower() for term in ("toy", "hand-built", "fallback", "small", "sample")):
             reasons.append("large or proprietary setup needs a small dataset fallback")
+    heavy_terms = experiment_heavy_terms(spec_text)
+    if heavy_terms:
+        if not any(term in dataset_text.lower() for term in ("toy", "hand-built", "fallback", "small", "built-in", "5-", "10")):
+            reasons.append("mini-lab should avoid heavy training, full benchmarks, or large framework setup")
+        if any(term in HEAVY_EXPERIMENT_BLOCKERS for term in heavy_terms):
+            reasons.append("mini-lab is too heavy for a 30-60 minute undergraduate smoke test")
     if "metric" in spec and spec.get("metric") and spec.get("failure_condition"):
         metric_head = _normalize_metric_token(str(spec["metric"]).split(",")[0].split()[0])
         failure_text = _normalize_metric_token(str(spec["failure_condition"]))
@@ -124,6 +184,60 @@ def evaluate_experiment_spec(spec: dict[str, Any]) -> EvalResult:
         if not any(term in ablation for term in ("remove", "disable", "only", "one", "without", "isolate")):
             reasons.append("ablation should isolate one variable")
     return EvalResult("experiment_spec", not reasons, reasons)
+
+
+def experiment_heavy_terms(text: str) -> list[str]:
+    lowered = text.lower()
+    return [
+        term
+        for term in HEAVY_EXPERIMENT_TERMS
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered)
+    ]
+
+
+def evaluate_starter_code(code: str) -> EvalResult:
+    reasons: list[str] = []
+    if not code.strip():
+        return EvalResult("starter_code_smoke", False, ["missing starter code"])
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return EvalResult("starter_code_smoke", False, [f"starter code syntax error: {exc.msg}"])
+
+    function_names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    for required in ("baseline", "paper_inspired", "score", "run"):
+        if required not in function_names:
+            reasons.append(f"starter code missing {required}()")
+
+    namespace: dict[str, Any] = {"__name__": "paperlens_starter_smoke"}
+    try:
+        exec(compile(tree, "<paperlens_starter>", "exec"), namespace)
+    except Exception as exc:  # pragma: no cover - defensive smoke gate
+        reasons.append(f"starter code failed during import: {type(exc).__name__}: {exc}")
+        return EvalResult("starter_code_smoke", not reasons, reasons)
+
+    run = namespace.get("run")
+    if callable(run):
+        try:
+            rows = run()
+        except Exception as exc:  # pragma: no cover - defensive smoke gate
+            reasons.append(f"starter run() failed: {type(exc).__name__}: {exc}")
+            rows = []
+        if not isinstance(rows, list) or not rows:
+            reasons.append("starter run() did not return non-empty rows")
+        else:
+            for idx, row in enumerate(rows[:3], start=1):
+                if not isinstance(row, dict):
+                    reasons.append(f"starter row {idx} is not a dict")
+                    continue
+                for key in ("baseline_score", "prototype_score", "metric", "failure_condition"):
+                    if key not in row:
+                        reasons.append(f"starter row {idx} missing {key}")
+    return EvalResult("starter_code_smoke", not reasons, reasons)
 
 
 def evaluate_growth_ideas(

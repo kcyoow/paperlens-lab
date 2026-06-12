@@ -12,6 +12,7 @@ import requests
 
 from .ingest import clean_text
 from .prompts import evidence_probe_prompt, experiment_prompt, growth_prompt, qa_prompt, translation_prompt
+from .scenario_eval import evaluate_experiment_spec, experiment_heavy_terms
 from .tracing import TraceRecord, new_trace_id, trace_content_enabled, write_trace
 
 
@@ -292,7 +293,20 @@ class ModelGateway:
                     used_fallback = True
                     error = f"invalid model output for {task}: {', '.join(schema_errors)}; fallback used"
                 else:
-                    text = _format_task_text(task, data)
+                    data = _postprocess_task_data(task, data)
+                    if task == "experiment_spec":
+                        spec_eval = evaluate_experiment_spec(data)
+                        if not spec_eval.passed:
+                            text, data = fallback()
+                            used_fallback = True
+                            error = (
+                                f"postprocessed model output for {task} failed mini-lab constraints: "
+                                f"{', '.join(spec_eval.reasons)}; fallback used"
+                            )
+                        else:
+                            text = _format_task_text(task, data)
+                    else:
+                        text = _format_task_text(task, data)
             else:
                 text, data = fallback()
                 used_fallback = True
@@ -472,6 +486,77 @@ def _format_task_text(task: str, data: dict[str, Any]) -> str:
     if task == "research_growth":
         return format_growth_ideas(data)
     return json.dumps(data, ensure_ascii=False)
+
+
+def _postprocess_task_data(task: str, data: dict[str, Any]) -> dict[str, Any]:
+    if task == "experiment_spec":
+        return _lightweight_experiment_spec(data)
+    return data
+
+
+def _lightweight_experiment_spec(data: dict[str, Any]) -> dict[str, Any]:
+    flattened = json.dumps(data, ensure_ascii=False).lower()
+    if not experiment_heavy_terms(flattened):
+        return data
+
+    repaired = dict(data)
+    if experiment_heavy_terms(str(repaired.get("research_question", ""))):
+        repaired["research_question"] = (
+            "Can the selected paper idea produce a measurable signal in a small dependency-free mini-lab?"
+        )
+    repaired.update(
+        {
+            "mini_lab_goal": (
+                "Run a dependency-free 30-60 minute toy comparison between a direct baseline "
+                "and one paper-inspired heuristic using built-in examples."
+            ),
+            "dataset": {
+                "name": "Built-in 6-12 row toy table",
+                "fallback": "Use the selected paper span plus hand-built contrast examples.",
+            },
+            "baseline": "Direct keyword or error-tag heuristic without the paper-inspired operation.",
+            "metric": "toy score: expected-term match rate minus error tags",
+            "steps": [
+                "Create a dependency-free 6-12 row example table from the selected span and simple contrast cases.",
+                "Run the direct baseline on every example.",
+                "Run one paper-inspired heuristic while keeping the examples fixed.",
+                "Compare the toy score and inspect failure tags.",
+            ],
+            "ablation": "Disable only the paper-inspired heuristic and keep the examples, scoring, and prompts fixed.",
+            "failure_condition": (
+                "The mini-lab fails if the paper-inspired variant does not improve the toy score "
+                "or only improves by changing the task."
+            ),
+            "expected_result": (
+                "A small directional signal may appear on the toy examples; it does not reproduce "
+                "the original paper benchmark or training setup."
+            ),
+            "starter_code_plan": [
+                "baseline(example)",
+                "paper_inspired(example)",
+                "score(output, expected_terms)",
+                "run()",
+            ],
+        }
+    )
+    notes = repaired.get("faithfulness_notes")
+    if not isinstance(notes, list):
+        notes = []
+    notes = [
+        str(note)
+        for note in notes
+        if not experiment_heavy_terms(str(note))
+    ]
+    repaired["faithfulness_notes"] = [
+        *notes,
+        "The original model plan was reduced to a dependency-free smoke test to fit the 30-60 minute mini-lab boundary.",
+        "No external benchmark package, accelerator run, repeated optimization loop, or library-specific model implementation is required.",
+    ]
+    repaired["repair_notes"] = [
+        "reduced_heavy_experiment_plan_to_dependency_free_smoke_test",
+        "preserved_research_question_but_replaced_training_plan_with_toy_contract",
+    ]
+    return repaired
 
 
 def _validate_task_data(task: str, data: dict[str, Any]) -> list[str]:

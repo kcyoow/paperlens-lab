@@ -1,6 +1,13 @@
 import unittest
 
-from paperlens_lab.analysis import analyze_paper, experiment_card, split_sentences, top_sentences
+from paperlens_lab.analysis import (
+    analyze_paper,
+    experiment_card,
+    split_sentences,
+    starter_code_from_spec,
+    top_sentences,
+)
+from paperlens_lab.scenario_eval import evaluate_starter_code
 from paperlens_lab.ingest import PaperSource
 
 
@@ -53,6 +60,25 @@ class AnalysisTests(unittest.TestCase):
         )
         self.assertIn("Experiment Card", card)
         self.assertIn("def baseline", code)
+
+    def test_starter_code_from_spec_smoke_runs(self):
+        code = starter_code_from_spec(
+            "Grounded Paper Explanation",
+            {
+                "research_question": "Do cited explanations reduce unsupported claims?",
+                "mini_lab_goal": "Compare a baseline with evidence-linked explanations.",
+                "dataset": {"name": "Toy abstracts", "fallback": "hand-built examples"},
+                "baseline": "Plain explanation",
+                "metric": "unsupported claim count",
+                "ablation": "Remove evidence links.",
+                "failure_condition": "Prototype score does not improve the metric.",
+                "expected_result": "A small reduction in unsupported claims.",
+            },
+            selected_span="We evaluate the assistant on scientific abstracts.",
+        )
+
+        self.assertIn("def paper_inspired", code)
+        self.assertTrue(evaluate_starter_code(code).passed)
 
 
 if __name__ == "__main__":

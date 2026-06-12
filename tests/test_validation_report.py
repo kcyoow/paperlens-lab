@@ -33,16 +33,20 @@ class ValidationReportTests(unittest.TestCase):
 
         self.assertTrue(summary["ok"])
         self.assertEqual(summary["realPaperRun"]["paperCount"], 3)
-        self.assertEqual(summary["realPaperRun"]["evaluationPassed"], 12)
-        self.assertEqual(summary["realPaperRun"]["evaluationTotal"], 12)
+        self.assertEqual(summary["realPaperRun"]["evaluationPassed"], 30)
+        self.assertEqual(summary["realPaperRun"]["evaluationTotal"], 30)
         self.assertTrue(summary["realPaperRun"]["evidenceConsistencyPassed"])
+        self.assertTrue(summary["realPaperRun"]["artifactContractPassed"])
         self.assertTrue(summary["realPaperRun"]["growthIterationPassed"])
+        self.assertTrue(summary["realPaperRun"]["starterCodePassed"])
         self.assertEqual(summary["realPaperRun"]["fineTuningRecommendation"], "no")
-        self.assertEqual(summary["modelTraces"]["total"], 6)
+        self.assertEqual(summary["modelTraces"]["total"], 18)
         self.assertEqual(summary["modelTraces"]["fallbackCount"], 0)
-        self.assertEqual(summary["modelTraces"]["byTask"]["grounded_qa"], 1)
-        self.assertEqual(summary["modelTraces"]["byTask"]["adversarial_grounded_qa"], 1)
-        self.assertEqual(summary["modelTraces"]["byTask"]["research_growth"], 2)
+        self.assertTrue(summary["modelTraces"]["traceIdsPassed"])
+        self.assertEqual(summary["modelTraces"]["requiredTraceIdCount"], 18)
+        self.assertEqual(summary["modelTraces"]["byTask"]["grounded_qa"], 3)
+        self.assertEqual(summary["modelTraces"]["byTask"]["adversarial_grounded_qa"], 3)
+        self.assertEqual(summary["modelTraces"]["byTask"]["research_growth"], 6)
         self.assertEqual(summary["memory"]["recordCount"], 3)
         self.assertEqual(summary["localDemo"]["selectedSpanId"], "P3.S9")
         self.assertEqual(summary["localDemo"]["evidenceWindow"], "P3.S6-P3.S12")
@@ -50,6 +54,7 @@ class ValidationReportTests(unittest.TestCase):
         self.assertEqual(summary["localDemo"]["sourceIndexHash"], "matching-source-hash")
         self.assertTrue(summary["localDemo"]["sourceIndexConsistent"])
         self.assertTrue(summary["localDemo"]["quoteIdsWithinWindow"])
+        self.assertTrue(summary["localDemo"]["quotesInSourceIndex"])
         self.assertFalse(summary["localDemo"]["usedFallback"])
 
     def test_source_index_mismatch_marks_validation_not_ok(self):
@@ -83,6 +88,18 @@ class ValidationReportTests(unittest.TestCase):
         self.assertFalse(summary["localDemo"]["quoteIdsWithinWindow"])
         self.assertEqual(summary["localDemo"]["unknownEvidenceIds"], ["S3"])
 
+    def test_local_quote_missing_from_source_index_marks_validation_not_ok(self):
+        ask_path = self.day / "local_after_source_index_ask_p3s9.json"
+        body = json.loads(ask_path.read_text(encoding="utf-8"))
+        body["evidence"] = [{"source_id": "P3.S9", "quote": "This quote is not in the indexed source span."}]
+        ask_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["localDemo"]["quotesInSourceIndex"])
+        self.assertEqual(summary["localDemo"]["badQuoteIds"], ["P3.S9"])
+
     def test_split_growth_iteration_evidence_marks_validation_not_ok(self):
         summary_path = self.run_dir / "summary.json"
         body = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -96,6 +113,78 @@ class ValidationReportTests(unittest.TestCase):
 
         self.assertFalse(summary["ok"])
         self.assertFalse(summary["realPaperRun"]["growthIterationPassed"])
+
+    def test_missing_starter_code_smoke_marks_validation_not_ok(self):
+        summary_path = self.run_dir / "summary.json"
+        body = json.loads(summary_path.read_text(encoding="utf-8"))
+        for run in body["runs"]:
+            run["evaluations"] = [
+                item for item in run["evaluations"] if item["name"] != "starter_code_smoke"
+            ]
+        summary_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["realPaperRun"]["starterCodePassed"])
+
+    def test_passed_starter_eval_with_broken_code_marks_validation_not_ok(self):
+        summary_path = self.run_dir / "summary.json"
+        body = json.loads(summary_path.read_text(encoding="utf-8"))
+        body["runs"][0]["model_outputs"]["starter_code"]["code"] = "def run(:\n"
+        summary_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["realPaperRun"]["starterCodePassed"])
+        self.assertFalse(summary["realPaperRun"]["papers"][0]["starterCodeRechecked"])
+
+    def test_missing_required_eval_marks_validation_not_ok(self):
+        summary_path = self.run_dir / "summary.json"
+        body = json.loads(summary_path.read_text(encoding="utf-8"))
+        body["runs"][0]["evaluations"] = [
+            item for item in body["runs"][0]["evaluations"] if item["name"] != "translation_fidelity"
+        ]
+        summary_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["realPaperRun"]["artifactContractPassed"])
+        self.assertIn("translation_fidelity", summary["realPaperRun"]["papers"][0]["requiredEvalMissing"])
+
+    def test_passed_experiment_eval_with_heavy_spec_marks_validation_not_ok(self):
+        summary_path = self.run_dir / "summary.json"
+        body = json.loads(summary_path.read_text(encoding="utf-8"))
+        body["runs"][0]["model_outputs"]["experiment"]["data"] = {
+            "research_question": "Can CUDA P100 full training reproduce WMT14?",
+            "mini_lab_goal": "Run multi-day full training.",
+            "dataset": {"name": "WMT14", "fallback": "toy examples"},
+            "baseline": "PyTorch model",
+            "metric": "BLEU",
+            "steps": ["Provision CUDA", "Train for 100 epochs", "Evaluate"],
+            "failure_condition": "BLEU is lower.",
+        }
+        summary_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["realPaperRun"]["artifactContractPassed"])
+        self.assertFalse(summary["realPaperRun"]["papers"][0]["experimentSpecRechecked"])
+
+    def test_missing_summary_trace_id_marks_validation_not_ok(self):
+        summary_path = self.run_dir / "summary.json"
+        body = json.loads(summary_path.read_text(encoding="utf-8"))
+        body["runs"][0]["model_outputs"]["experiment"]["trace_id"] = "missing-trace-id"
+        summary_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["modelTraces"]["traceIdsPassed"])
+        self.assertIn("missing-trace-id", " ".join(summary["modelTraces"]["traceIdIssues"]))
 
     def test_stale_summary_without_source_evidence_is_not_green(self):
         stale_dir = self.day / "hf_three_papers_stale"
@@ -143,7 +232,7 @@ class ValidationReportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["modelTraces"]["modelCount"], 6)
+        self.assertEqual(body["modelTraces"]["modelCount"], 18)
         self.assertEqual(body["localDemo"]["translationStatus"], "ready")
 
     def _write_validation_tree(self):
@@ -168,14 +257,7 @@ class ValidationReportTests(unittest.TestCase):
         }
         (self.run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
 
-        trace_records = [
-            {"task": "translation", "status": "model", "provider": "hf", "model": "test-small", "error": None},
-            {"task": "grounded_qa", "status": "model", "provider": "hf", "model": "test-small", "error": None},
-            {"task": "adversarial_grounded_qa", "status": "model", "provider": "hf", "model": "test-small", "error": None},
-            {"task": "experiment_spec", "status": "model", "provider": "hf", "model": "test-small", "error": None},
-            {"task": "research_growth", "status": "model", "provider": "hf", "model": "test-small", "error": None},
-            {"task": "research_growth", "status": "model", "provider": "hf", "model": "test-small", "error": None},
-        ]
+        trace_records = self._trace_records_from_summary(summary)
         self._write_jsonl(self.day / "hf_three_papers_rerun_traces.jsonl", trace_records)
         self._write_jsonl(
             self.day / "hf_three_papers_rerun_memory.jsonl",
@@ -226,7 +308,12 @@ class ValidationReportTests(unittest.TestCase):
                     "source_text_hash": "matching-source-hash",
                     "source_text_chars": 32005,
                     "spans": [
-                        {"span_id": "P3.S9", "position": 99, "text_hash": "span-hash"},
+                        {
+                            "span_id": "P3.S9",
+                            "position": 99,
+                            "text_hash": "span-hash",
+                            "text": "In this work we propose the Transformer",
+                        },
                     ],
                 }
             ),
@@ -256,16 +343,37 @@ class ValidationReportTests(unittest.TestCase):
             "memory": {"records_after_growth": 4},
             "evaluations": [
                 {"name": "pdf_parse_and_reader_spans", "passed": True, "reasons": []},
+                {"name": "translation_fidelity", "passed": True, "reasons": []},
                 {"name": "grounded_qa", "passed": True, "reasons": []},
+                {"name": "middle_selected_span_grounding", "passed": True, "reasons": []},
                 {"name": "adversarial_lost_in_the_middle", "passed": True, "reasons": []},
+                {"name": "experiment_spec", "passed": True, "reasons": []},
+                {"name": "starter_code_smoke", "passed": True, "reasons": []},
+                {"name": "growth_ideas", "passed": True, "reasons": []},
                 {"name": "research_growth_iteration", "passed": True, "reasons": []},
+                {"name": "model_backing", "passed": True, "reasons": []},
             ],
             "model_outputs": {
+                "translation": {
+                    "task": "translation",
+                    "trace_id": f"{name}-translation",
+                    "provider": "hf",
+                    "model": "test-small",
+                    "used_fallback": False,
+                    "error": None,
+                    "data": {"translations": [{"span_id": "P3.S9", "translation": "번역"}]},
+                },
                 "qa": [
                     {
                         "span": {"id": "P3.S9"},
                         "source_evidence": {"P3.S9": "In this work we propose the Transformer"},
                         "result": {
+                            "task": "grounded_qa",
+                            "trace_id": f"{name}-qa",
+                            "provider": "hf",
+                            "model": "test-small",
+                            "used_fallback": False,
+                            "error": None,
                             "data": {
                                 "evidence": [
                                     {
@@ -277,7 +385,67 @@ class ValidationReportTests(unittest.TestCase):
                         },
                     }
                 ],
+                "adversarial_litm": {
+                    "result": {
+                        "task": "adversarial_grounded_qa",
+                        "trace_id": f"{name}-adversarial",
+                        "provider": "hf",
+                        "model": "test-small",
+                        "used_fallback": False,
+                        "error": None,
+                        "data": {
+                            "evidence": [
+                                {
+                                    "source_id": "P3.S9",
+                                    "quote": "In this work we propose the Transformer",
+                                }
+                            ]
+                        },
+                    },
+                    "source_evidence": {"P3.S9": "In this work we propose the Transformer"},
+                    "stats": {
+                        "context_span_count": 80,
+                        "context_chars": 9000,
+                        "target_span_id": "P3.S9",
+                        "target_char_offset_ratio": 0.5,
+                        "distractor_count": 79,
+                    },
+                },
+                "experiment": {
+                    "task": "experiment_spec",
+                    "trace_id": f"{name}-experiment",
+                    "provider": "hf",
+                    "model": "test-small",
+                    "used_fallback": False,
+                    "error": None,
+                    "data": {
+                        "research_question": "Can this idea help on a toy task?",
+                        "mini_lab_goal": "Run a small dependency-free comparison.",
+                        "dataset": {"name": "Toy examples", "fallback": "10 hand-built examples"},
+                        "baseline": "Direct keyword baseline.",
+                        "metric": "toy score",
+                        "steps": ["Build examples", "Run baseline", "Run variant"],
+                        "ablation": "Remove only the paper-inspired heuristic.",
+                        "failure_condition": "toy score does not improve.",
+                    },
+                },
+                "starter_code": {"task": "starter_code", "code": self._starter_code()},
+                "growth": {
+                    "task": "research_growth",
+                    "trace_id": f"{name}-growth",
+                    "provider": "hf",
+                    "model": "test-small",
+                    "used_fallback": False,
+                    "error": None,
+                    "data": {"ideas": [{"source_evidence": ["paper:selected-middle", "run:r1"]}]},
+                },
                 "growth_iteration": {
+                    "task": "research_growth",
+                    "trace_id": f"{name}-growth-iteration",
+                    "provider": "hf",
+                    "model": "test-small",
+                    "used_fallback": False,
+                    "error": None,
                     "data": {
                         "ideas": [
                             {
@@ -292,6 +460,60 @@ class ValidationReportTests(unittest.TestCase):
                 },
             },
         }
+
+    def _trace_records_from_summary(self, summary):
+        records = []
+        task_by_key = {
+            "translation": "translation",
+            "experiment": "experiment_spec",
+            "growth": "research_growth",
+            "growth_iteration": "research_growth",
+        }
+        for run in summary["runs"]:
+            outputs = run["model_outputs"]
+            for key, task in task_by_key.items():
+                records.append(self._trace_record(outputs[key]["trace_id"], task))
+            for qa in outputs["qa"]:
+                records.append(self._trace_record(qa["result"]["trace_id"], "grounded_qa"))
+            records.append(
+                self._trace_record(
+                    outputs["adversarial_litm"]["result"]["trace_id"],
+                    "adversarial_grounded_qa",
+                )
+            )
+        return records
+
+    def _trace_record(self, trace_id, task):
+        return {
+            "trace_id": trace_id,
+            "task": task,
+            "status": "model",
+            "provider": "hf",
+            "model": "test-small",
+            "error": None,
+        }
+
+    def _starter_code(self):
+        return """def baseline(example):
+    return example.get("text", "")
+
+def paper_inspired(example):
+    return example.get("text", "") + " Transformer"
+
+def score(output, expected):
+    return 1.0 if expected in output else 0.0
+
+def run():
+    example = {"text": "In this work we propose the", "expected": "Transformer"}
+    base = baseline(example)
+    variant = paper_inspired(example)
+    return [{
+        "baseline_score": score(base, example["expected"]),
+        "prototype_score": score(variant, example["expected"]),
+        "metric": "toy score",
+        "failure_condition": "prototype_score <= baseline_score",
+    }]
+"""
 
     def _write_jsonl(self, path, records):
         path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")

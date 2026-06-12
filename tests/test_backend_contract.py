@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from paperlens_lab.ingest import PaperSource
+from paperlens_lab.scenario_eval import evaluate_starter_code
 from paperlens_lab.server import create_app, paper_document_from_source
 from paperlens_lab.source_index import load_source_index
 
@@ -395,6 +396,9 @@ class BackendContractTests(unittest.TestCase):
         self.assertIn("starter", exp_body)
         self.assertIn("spec", exp_body)
         self.assertIn("metric", exp_body["spec"])
+        self.assertTrue(evaluate_starter_code(exp_body["starter"]).passed)
+        self.assertIn(exp_body["spec"]["metric"], exp_body["starter"])
+        self.assertIn(exp_body["spec"]["failure_condition"], exp_body["starter"])
 
         growth = self.client.post(
             "/api/growth",

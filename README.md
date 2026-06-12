@@ -103,12 +103,15 @@ Current verified snapshot:
 
 - Real arXiv/PDF papers: 3
 - Named papers: `1706.03762`, `2005.11401`, `2106.09685`
-- Real-paper evaluations: 33/33 passed in `hf_three_papers_full_pdf_reader_v10`
+- Real-paper evaluations: 36/36 passed in `hf_three_papers_starter_smoke_v13`
 - Model traces: 27/27 stored latest real-paper traces are `status=model`, with 0 fallbacks and 0 trace errors
+- Trace binding: 24 summary-referenced trace IDs are present in the matching trace JSONL with `status=model` and no errors
 - Scope: parsed 15/19/26 PDF pages for `1706.03762` / `2005.11401` / `2106.09685`; reader spans are 548/1000/1000, with larger papers capped by the 1000-span validation limit
 - Adversarial long-context proof: each paper includes an 8k+ character ordered evidence packet with the target evidence buried near the middle and at least 111 distractor spans; the model must cite the exact target source ID and quote without fallback
+- Runnable mini-lab proof: every paper generates dependency-free starter code and passes `starter_code_smoke` by parsing, importing, and running `run()`
+- ExperimentSpec proof: saved paper-to-lab specs are revalidated by the current evaluator so old heavy benchmark/GPU plans cannot stay green
 - Research Growth iteration proof: every paper runs a second Growth pass after the first ideas are written to memory; the second pass must cite `paper:selected-middle`, `run:r1`, and a prior `growth_idea:*` memory
-- Persistent memory proof: 15 JSONL memory records across 3 papers, including `paper_span`, `mini_lab_result`, `growth_idea`, and `growth_iteration_idea`
+- Persistent memory proof: 14 JSONL memory records across 3 papers, including `paper_span`, `mini_lab_result`, `growth_idea`, and `growth_iteration_idea`
 - Local selected-span API proof: `1706.03762`, span `P5.S8`, evidence window `P5.S5-P5.S11`, quote id `P5.S8`, source hash `824e98d76dcb7231`
 - Evidence consistency: saved QA citations are checked against stored source-evidence maps, adversarial quotes are validated against the long-context evidence packet, and local quote ids must stay inside the source-index window
 - Fine-tuning decision from real failures: `no`; no repeated trainable failure cluster has been observed yet
@@ -117,7 +120,7 @@ Useful validation commands:
 
 ```bash
 RUN_ROOT="outputs/service_demo_validation/$(date +%F)"
-RUN_NAME="hf_three_papers_full_pdf_reader_v10"
+RUN_NAME="hf_three_papers_starter_smoke_v13"
 PAPERLENS_PROVIDER=hf \
 PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
 PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \

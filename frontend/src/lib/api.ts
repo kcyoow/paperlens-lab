@@ -59,6 +59,7 @@ export interface ValidationSummary {
     evidenceConsistencyPassed?: boolean;
     evidenceConsistencyIssues?: string[];
     growthIterationPassed?: boolean;
+    starterCodePassed?: boolean;
     fineTuningRecommendation: string;
     fineTuningReason: string;
     papers: Array<{
@@ -84,6 +85,7 @@ export interface ValidationSummary {
       evaluations?: Array<{ name: string; passed: boolean; reasons: string[] }>;
       memoryRecordsAfterGrowth: number;
       memoryRecordsBeforeGrowthIteration?: number;
+      starterCodePassed?: boolean;
       growthIterationPassed?: boolean;
       growthIterationEvidence?: string[];
       growthIterationIdeaEvidence?: string[][];

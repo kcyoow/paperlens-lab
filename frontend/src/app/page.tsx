@@ -328,14 +328,18 @@ function ValidationEvidencePanel({
   const fineTuning = realPaperRun?.fineTuningRecommendation ?? "unknown";
   const papers = realPaperRun?.papers?.map((paper) => paper.arxiv || paper.name).filter(Boolean) ?? [];
   const firstPaper = realPaperRun?.papers?.[0];
+  const paperRuns = realPaperRun?.papers ?? [];
   const litm = firstPaper?.adversarialLitm;
   const growthEvidence = firstPaper?.growthIterationEvidence ?? [];
   const growthLoopOk =
     realPaperRun?.growthIterationPassed === true &&
     growthEvidence.some((item) => item.startsWith("growth_idea:")) &&
     growthEvidence.includes("run:r1");
-  const scope = firstPaper
-    ? `${firstPaper.pageMarkers} parsed pages · ${firstPaper.readerSpans}/${firstPaper.totalSentenceCount || firstPaper.readerSpans} reader spans`
+  const starterOk = realPaperRun?.starterCodePassed === true;
+  const scope = paperRuns.length
+    ? `${paperRuns.map((paper) => paper.pageMarkers).join("/")} parsed pages · ${paperRuns
+        .map((paper) => paper.readerSpans)
+        .join("/")} reader spans`
     : "no scope";
   const litmRatio =
     typeof litm?.target_char_offset_ratio === "number"
@@ -416,6 +420,12 @@ function ValidationEvidencePanel({
             {locale === "ko" ? "Growth 루프" : "Growth loop"}:
           </span>{" "}
           {growthLoopOk ? "paper + run:r1 + prior idea" : "rerun needed"}
+        </p>
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "Mini-lab 코드" : "Mini-lab code"}:
+          </span>{" "}
+          {starterOk ? "compile + run smoke" : "rerun needed"}
         </p>
       </div>
 

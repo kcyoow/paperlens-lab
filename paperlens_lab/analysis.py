@@ -5,6 +5,7 @@ import re
 import textwrap
 from collections import Counter
 from dataclasses import dataclass
+from typing import Any
 from typing import Iterable
 
 from .ingest import PaperSource, clean_text
@@ -325,3 +326,139 @@ def starter_code(title: str, terms: list[str], idea: str) -> str:
                 print(row)
         """
     ).strip() + "\n"
+
+
+def starter_code_from_spec(
+    title: str,
+    spec: dict[str, Any],
+    *,
+    selected_span: str = "",
+) -> str:
+    """Build a dependency-free starter that can be compiled and smoke-run."""
+
+    safe_title = repr(title or "Untitled paper")
+    question = repr(str(spec.get("research_question") or "Does the paper-inspired variant help?"))
+    metric = repr(str(spec.get("metric") or "score"))
+    baseline = repr(str(spec.get("baseline") or "Direct baseline"))
+    ablation = repr(str(spec.get("ablation") or "Remove the paper-inspired component."))
+    failure = repr(str(spec.get("failure_condition") or "Prototype score does not beat baseline score."))
+    expected = repr(str(spec.get("expected_result") or "A modest measurable change, if any."))
+    span = repr(selected_span or str(spec.get("mini_lab_goal") or "A short paper example goes here."))
+    keywords = _starter_keywords(spec, selected_span)
+    keyword_list = repr(keywords)
+    dataset_name = ""
+    dataset = spec.get("dataset")
+    if isinstance(dataset, dict):
+        dataset_name = str(dataset.get("name") or dataset.get("fallback") or "")
+    else:
+        dataset_name = str(dataset or "")
+    dataset_repr = repr(dataset_name or "hand-built mini set")
+
+    return textwrap.dedent(
+        f"""
+        \"\"\"Runnable PaperLens mini-lab starter.
+
+        Paper: {title}
+        This file is intentionally dependency-free so it can run in a clean Space,
+        notebook, or local Python process before a student replaces the toy data.
+        \"\"\"
+
+        PAPER_TITLE = {safe_title}
+        RESEARCH_QUESTION = {question}
+        DATASET = {dataset_repr}
+        METRIC = {metric}
+        BASELINE = {baseline}
+        ABLATION = {ablation}
+        FAILURE_CONDITION = {failure}
+        EXPECTED_RESULT = {expected}
+        KEYWORDS = {keyword_list}
+
+
+        EXAMPLES = [
+            {{
+                "id": "paper-span-1",
+                "input": {span},
+                "expected_terms": KEYWORDS[:3],
+            }},
+            {{
+                "id": "contrast-1",
+                "input": "A control example that omits most paper-specific cues.",
+                "expected_terms": [],
+            }},
+        ]
+
+
+        def baseline(example):
+            text = example["input"].lower()
+            hits = [term for term in KEYWORDS if term.lower() in text]
+            return {{
+                "method": "baseline",
+                "prediction": "paper-related" if hits else "control",
+                "hits": hits[:1],
+            }}
+
+
+        def paper_inspired(example):
+            text = example["input"].lower()
+            hits = [term for term in KEYWORDS if term.lower() in text]
+            return {{
+                "method": "paper_inspired",
+                "prediction": "paper-related" if len(hits) >= 1 else "control",
+                "hits": hits,
+                "ablation": ABLATION,
+            }}
+
+
+        def score(output, expected_terms):
+            if not expected_terms:
+                return 1.0 if output["prediction"] == "control" else 0.0
+            matched = set(term.lower() for term in output.get("hits", []))
+            expected = set(term.lower() for term in expected_terms)
+            return len(matched & expected) / max(1, len(expected))
+
+
+        def run(examples=None):
+            rows = []
+            for example in examples or EXAMPLES:
+                base = baseline(example)
+                proto = paper_inspired(example)
+                rows.append({{
+                    "id": example["id"],
+                    "baseline_score": score(base, example["expected_terms"]),
+                    "prototype_score": score(proto, example["expected_terms"]),
+                    "baseline": base,
+                    "prototype": proto,
+                    "metric": METRIC,
+                    "failure_condition": FAILURE_CONDITION,
+                }})
+            return rows
+
+
+        if __name__ == "__main__":
+            import json
+
+            print(json.dumps(run(), indent=2, ensure_ascii=False))
+        """
+    ).strip() + "\n"
+
+
+def _starter_keywords(spec: dict[str, Any], selected_span: str) -> list[str]:
+    values: list[str] = []
+    for key in ("research_question", "mini_lab_goal", "baseline", "metric", "ablation", "expected_result"):
+        values.append(str(spec.get(key) or ""))
+    dataset = spec.get("dataset")
+    if isinstance(dataset, dict):
+        values.extend(str(item or "") for item in dataset.values())
+    elif dataset:
+        values.append(str(dataset))
+    values.append(selected_span)
+    text = " ".join(values)
+    candidates = extract_terms(text, limit=8)
+    if len(candidates) < 3:
+        candidates.extend(token for token in words(text) if token not in STOPWORDS and len(token) > 4)
+    deduped = []
+    for candidate in candidates:
+        cleaned = clean_text(candidate).strip(" ,.;:")
+        if cleaned and cleaned.lower() not in {item.lower() for item in deduped}:
+            deduped.append(cleaned)
+    return deduped[:6] or ["paper", "baseline", "metric"]
