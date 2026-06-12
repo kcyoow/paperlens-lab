@@ -3,9 +3,10 @@ title: PaperLens Lab
 emoji: "📄"
 colorFrom: green
 colorTo: gray
-sdk: static
-app_build_command: cd frontend && npm ci && npm run build && cp -R out/* ..
-app_file: index.html
+sdk: gradio
+sdk_version: 5.50.0
+python_version: 3.12
+app_file: app.py
 pinned: false
 license: apache-2.0
 ---
@@ -16,15 +17,15 @@ Read, verify, and prototype ideas from research papers.
 
 PaperLens Lab is moving toward a reader-first paper workspace: read the source text, compare translation, mark important lines, ask grounded questions, and turn promising ideas into small experiments.
 
-## Frontend Preview Baseline
+## Gradio Hackathon Runtime
 
-The current Hugging Face Space serves the Next.js frontend baseline from `frontend/` as a static preview. This is the product frame we will refine before connecting the backend.
+The active Hugging Face Space is a Gradio app, matching the Build Small Hackathon requirement. The Gradio runtime now renders a custom reader workspace that preserves the current Next.js mockup's visual direction as closely as practical inside a Space-friendly Gradio app.
 
 - Default UI language: English.
 - Optional UI language: Korean.
-- Main route: `/reader`.
-- Build output: `frontend/out/`, copied to the Space root during the Static Space build.
-- Current boundary: PDF parsing, translation generation, AI answers, and experiment generation are still mocked.
+- Main runtime: `app.py`.
+- Visual source-of-truth: `frontend/`.
+- Current boundary: PDF parsing and source extraction work locally; full translation generation, AI answers, and experiment execution are still staged backend work.
 
 ## Current Preview Flow
 
@@ -36,9 +37,9 @@ The current Hugging Face Space serves the Next.js frontend baseline from `fronte
 
 ## Backend Prototype
 
-The earlier Gradio prototype code remains in this repository as the backend direction, but it is not the active Space runtime while the Space is configured as a static frontend preview.
+The Gradio app keeps the original backend hooks for source-grounded analysis and experiment cards. It also keeps the reader-first flow visible: original text, Korean translation draft, side-by-side checking, marks, source inspection, AI question affordance, and Lab Mode affordance.
 
-Later, the single-Space path should move to a Docker Space so the same URL can serve the frontend and backend together.
+Later, the single-Space path can move to `gradio.Server` or Docker if the custom frontend needs full React-level interaction while staying compatible with the Gradio-centered hackathon rules.
 
 ## Model Use
 
@@ -53,7 +54,7 @@ The default model target is under the Build Small Hackathon's 32B limit.
 
 ## Local Run
 
-Frontend preview:
+Next design reference:
 
 ```bash
 cd frontend
@@ -61,7 +62,7 @@ npm install
 npm run dev
 ```
 
-Backend prototype:
+Active Gradio Space app:
 
 ```bash
 python -m pip install -r requirements.txt
