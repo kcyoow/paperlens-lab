@@ -48,4 +48,6 @@ export interface QAMessage {
   content: string;
   supportSpanIds?: string[];
   isExternalKnowledge?: boolean;
+  isBackendGenerated?: boolean;
+  isLoading?: boolean;
 }

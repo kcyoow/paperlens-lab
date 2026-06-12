@@ -7,6 +7,7 @@ sdk: gradio
 sdk_version: 5.50.0
 python_version: 3.12
 app_file: app.py
+base_path: /
 pinned: false
 license: apache-2.0
 ---
@@ -17,14 +18,15 @@ Read, verify, and prototype ideas from research papers.
 
 PaperLens Lab is moving toward a reader-first paper workspace: read the source text, compare translation, mark important lines, ask grounded questions, and turn promising ideas into small experiments.
 
-## Gradio Hackathon Runtime
+## Hybrid Hackathon Runtime
 
-The active Hugging Face Space is a Gradio app, matching the Build Small Hackathon requirement. The Gradio runtime now renders a custom reader workspace that preserves the current Next.js mockup's visual direction as closely as practical inside a Space-friendly Gradio app.
+The active Hugging Face Space stays on the Gradio SDK for Build Small Hackathon compatibility, but the product surface is a React/Next reader. `app.py` runs a FastAPI shell that serves the exported frontend at `/`, exposes Python model endpoints under `/api/*`, and keeps the Gradio demo available at `/gradio`.
 
 - Default UI language: English.
 - Optional UI language: Korean.
 - Main runtime: `app.py`.
-- Visual source-of-truth: `frontend/`.
+- Product frontend: `frontend/`, exported to `frontend/out`.
+- Gradio fallback/demo: `/gradio`.
 - Current boundary: PDF parsing and source extraction work locally; full translation generation, AI answers, and experiment execution are still staged backend work.
 
 ## Current Preview Flow
@@ -37,9 +39,14 @@ The active Hugging Face Space is a Gradio app, matching the Build Small Hackatho
 
 ## Backend Prototype
 
-The Gradio app keeps the original backend hooks for source-grounded analysis and experiment cards. It also keeps the reader-first flow visible: original text, Korean translation draft, side-by-side checking, marks, source inspection, AI question affordance, and Lab Mode affordance.
+The Python backend keeps the original hooks for source-grounded analysis and experiment cards, and the React UI now calls it through:
 
-Later, the single-Space path can move to `gradio.Server` or Docker if the custom frontend needs full React-level interaction while staying compatible with the Gradio-centered hackathon rules.
+- `POST /api/paper` for arXiv/text source loading.
+- `POST /api/paper/upload` for PDF extraction.
+- `POST /api/ask` for selected-span grounded answers.
+- `POST /api/experiment` for paper-to-experiment cards and starter code.
+
+The reader-first flow remains in React: original text, Korean translation draft, side-by-side checking, marks, source inspection, AI question affordance, and Lab Mode affordance.
 
 ## Model Use
 
@@ -54,20 +61,22 @@ The default model target is under the Build Small Hackathon's 32B limit.
 
 ## Local Run
 
-Next design reference:
+Frontend product surface:
 
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run build
 ```
 
-Active Gradio Space app:
+Hybrid Space app:
 
 ```bash
 python -m pip install -r requirements.txt
 python app.py
 ```
+
+Open `http://127.0.0.1:7860/` for the React reader and `http://127.0.0.1:7860/gradio` for the Gradio fallback.
 
 ## Hackathon Entry Status
 

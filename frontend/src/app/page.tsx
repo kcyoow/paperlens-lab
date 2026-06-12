@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { loadPaper, savePaperToSession, uploadPaper } from "@/lib/api";
 import { getInitialLocale, LandingInputMode, Locale, UI_TEXT } from "@/lib/i18n";
 
 export default function LandingPage() {
@@ -11,14 +12,36 @@ export default function LandingPage() {
   const [inputMode, setInputMode] = useState<LandingInputMode>("upload");
   const [arxivUrl, setArxivUrl] = useState("");
   const [pastedText, setPastedText] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const text = UI_TEXT[locale].landing;
 
   useEffect(() => {
     setLocale(getInitialLocale(new URLSearchParams(window.location.search).get("lang")));
   }, []);
 
-  function handleStart() {
-    router.push(`/reader?lang=${locale}`);
+  async function handleStart() {
+    setLoadError("");
+    setIsLoading(true);
+    try {
+      const paper =
+        inputMode === "upload" && selectedFile
+          ? await uploadPaper(selectedFile)
+          : inputMode === "arxiv" && arxivUrl.trim()
+            ? await loadPaper({ arxiv_or_url: arxivUrl.trim() })
+            : inputMode === "paste" && pastedText.trim()
+              ? await loadPaper({ pasted_text: pastedText.trim() })
+              : null;
+
+      if (paper) savePaperToSession(paper);
+      router.push(`/reader?lang=${locale}`);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Could not load the paper.");
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   return (
@@ -103,6 +126,8 @@ export default function LandingPage() {
               onDrop={(e) => {
                 e.preventDefault();
                 setDragOver(false);
+                const file = e.dataTransfer.files.item(0);
+                if (file) setSelectedFile(file);
               }}
               className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed py-16 transition-colors ${
                 dragOver
@@ -128,9 +153,22 @@ export default function LandingPage() {
                 <line x1="15" y1="15" x2="12" y2="12" />
               </svg>
               <p className="mb-1 text-sm font-medium text-text-secondary">
-                {text.uploadPrimary}
+                {selectedFile ? selectedFile.name : text.uploadPrimary}
               </p>
-              <button className="text-sm font-medium text-primary-600 hover:text-primary-700">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(event) => {
+                  setSelectedFile(event.target.files?.item(0) ?? null);
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="text-sm font-medium text-primary-600 hover:text-primary-700"
+              >
                 {text.uploadAction}
               </button>
             </div>
@@ -168,6 +206,7 @@ export default function LandingPage() {
           {/* Action */}
           <button
             onClick={handleStart}
+            disabled={isLoading}
             className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-primary-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary-700 active:bg-primary-800"
           >
             <svg
@@ -183,8 +222,13 @@ export default function LandingPage() {
               <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
               <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
             </svg>
-            {text.startButton}
+            {isLoading ? "Loading paper..." : text.startButton}
           </button>
+          {loadError && (
+            <p className="mt-3 rounded-lg border border-highlight-red bg-highlight-red/60 px-3 py-2 text-xs text-text-secondary">
+              {loadError}
+            </p>
+          )}
         </div>
 
         {/* Feature Highlights */}

@@ -14,7 +14,7 @@ This folder is the current frontend baseline for PaperLens Lab.
 ## Routes
 
 - `/` - paper input landing screen.
-- `/reader` - mock paper reader and Lab Mode workspace.
+- `/reader` - paper reader and Lab Mode workspace.
 
 ## Commands
 
@@ -32,13 +32,16 @@ To preview the static export locally:
 npm run preview:static
 ```
 
-## Current Boundaries
+## Backend Connection
 
-- The current reader uses mock paper data from `src/lib/mock-data.ts`.
-- PDF parsing, arXiv fetching, translation generation, AI answers, and experiment generation are not connected to a backend yet.
+- The static export is served by the Python app at `/`.
+- API calls go to the same origin under `/api/*`.
+- `src/lib/mock-data.ts` remains the offline fallback when no paper is loaded.
+- PDF parsing, arXiv fetching, selected-span Q&A, and experiment card generation are connected to the Python backend.
+- Full translation generation is still a staged model feature; dynamically loaded papers currently show Korean draft placeholders.
 - UI text is handled by the local `src/lib/i18n.ts` dictionary.
 - Generated folders such as `.next/`, `out/`, and `node_modules/` are intentionally ignored.
 
 ## Deployment Direction
 
-The frontend is prepared for a static-first deployment path, such as a Hugging Face Static Space. A backend can be connected later through API calls without changing this baseline reader flow.
+The product frontend stays in React/Next, while the Hugging Face Space remains `sdk: gradio`. `app.py` serves the exported `out/` files and mounts the Gradio fallback under `/gradio`.

@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { MOCK_PAPER } from "@/lib/mock-data";
+import { askAboutSpan, loadPaperFromSession } from "@/lib/api";
 import {
   ViewMode,
   Annotation,
@@ -17,8 +18,7 @@ import AnnotationBar from "@/components/AnnotationBar";
 import LabModal from "@/components/LabModal";
 
 export default function ReaderPage() {
-  const paper = MOCK_PAPER;
-
+  const [paper, setPaper] = useState(MOCK_PAPER);
   const [locale, setLocale] = useState<Locale>("en");
   const [viewMode, setViewMode] = useState<ViewMode>("original");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
@@ -36,6 +36,11 @@ export default function ReaderPage() {
 
   useEffect(() => {
     setLocale(getInitialLocale(new URLSearchParams(window.location.search).get("lang")));
+    const sessionPaper = loadPaperFromSession();
+    if (sessionPaper) {
+      setPaper(sessionPaper);
+      setActiveSectionId(sessionPaper.sections[0]?.id ?? "");
+    }
   }, []);
 
   const allSpans = paper.sections.flatMap((s) =>
@@ -46,6 +51,7 @@ export default function ReaderPage() {
     (id: string) => allSpans.find((s) => s.id === id) ?? null,
     [allSpans],
   );
+  const sourceText = allSpans.map((span) => span.original).join(" ");
 
   function handleSpanClick(spanId: string) {
     setSelectedSpanId(spanId);
@@ -72,30 +78,56 @@ export default function ReaderPage() {
     }
   }
 
-  function handleAskAI() {
+  async function handleAskAI() {
     if (!selectedSpanId) return;
     setShowQA(true);
     const span = findSpan(selectedSpanId);
     if (!span) return;
 
+    const question =
+      locale === "ko"
+        ? `이 문장에 대해 설명해주세요: "${span.translated}"`
+        : `Explain this sentence: "${span.original}"`;
     const userMsg: QAMessage = {
       id: `qa-${Date.now()}`,
       role: "user",
-      content:
-        locale === "ko"
-          ? `이 문장에 대해 설명해주세요: "${span.translated}"`
-          : `Explain this sentence: "${span.original}"`,
+      content: question,
       supportSpanIds: [selectedSpanId],
     };
 
-    const assistantMsg: QAMessage = {
+    const pendingMsg: QAMessage = {
       id: `qa-${Date.now() + 1}`,
       role: "assistant",
-      content: generateMockAnswer(span, locale),
+      content: locale === "ko" ? "백엔드에서 근거를 확인하는 중..." : "Checking backend evidence...",
       supportSpanIds: [selectedSpanId],
+      isLoading: true,
     };
 
-    setQaMessages([...qaMessages, userMsg, assistantMsg]);
+    setQaMessages((messages) => [...messages, userMsg, pendingMsg]);
+    try {
+      const answer = await askAboutSpan({
+        span,
+        paperTitle: paper.title,
+        sourceText,
+        question,
+        locale,
+      });
+      setQaMessages((messages) =>
+        messages.map((message) => (message.id === pendingMsg.id ? answer : message)),
+      );
+    } catch {
+      setQaMessages((messages) =>
+        messages.map((message) =>
+          message.id === pendingMsg.id
+            ? {
+                ...pendingMsg,
+                content: generateMockAnswer(span, locale),
+                isLoading: false,
+              }
+            : message,
+        ),
+      );
+    }
   }
 
   function handleTryExperiment() {
@@ -229,6 +261,8 @@ export default function ReaderPage() {
           setShowQA={setShowQA}
           viewMode={viewMode}
           locale={locale}
+          paperTitle={paper.title}
+          sourceText={sourceText}
         />
       </div>
 
@@ -247,6 +281,8 @@ export default function ReaderPage() {
         <LabModal
           span={labSpan}
           locale={locale}
+          paperTitle={paper.title}
+          sourceText={sourceText}
           onClose={() => setLabSpan(null)}
         />
       )}

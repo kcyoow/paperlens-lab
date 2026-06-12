@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Dispatch, SetStateAction, useEffect, useState } from "react";
+import { askAboutSpan } from "@/lib/api";
 import { Span, QAMessage, ViewMode } from "@/lib/types";
 import { Locale, UI_TEXT } from "@/lib/i18n";
 
@@ -9,10 +10,12 @@ interface Props {
   findSpan: (id: string) => Span | null;
   showQA: boolean;
   qaMessages: QAMessage[];
-  setQaMessages: (msgs: QAMessage[]) => void;
+  setQaMessages: Dispatch<SetStateAction<QAMessage[]>>;
   setShowQA: (show: boolean) => void;
   viewMode: ViewMode;
   locale: Locale;
+  paperTitle: string;
+  sourceText: string;
 }
 
 export default function RightPanel({
@@ -24,6 +27,8 @@ export default function RightPanel({
   setShowQA,
   viewMode,
   locale,
+  paperTitle,
+  sourceText,
 }: Props) {
   const [qaInput, setQaInput] = useState("");
   const span = selectedSpanId ? findSpan(selectedSpanId) : null;
@@ -31,29 +36,60 @@ export default function RightPanel({
 
   const [tab, setTab] = useState<"source" | "qa">("source");
 
-  function handleSendQuestion() {
+  useEffect(() => {
+    if (showQA) setTab("qa");
+  }, [showQA]);
+
+  async function handleSendQuestion() {
     if (!qaInput.trim() || !selectedSpanId || !span) return;
 
+    const question = qaInput;
     const userMsg: QAMessage = {
       id: `qa-${Date.now()}`,
       role: "user",
-      content: qaInput,
+      content: question,
       supportSpanIds: [selectedSpanId],
     };
 
-    const assistantMsg: QAMessage = {
+    const pendingMsg: QAMessage = {
       id: `qa-${Date.now() + 1}`,
       role: "assistant",
-      content: text.mockQuestionResponse(
-        locale === "ko" ? span.translated.slice(0, 40) : span.original.slice(0, 40),
-      ),
+      content: locale === "ko" ? "백엔드에서 근거를 확인하는 중..." : "Checking backend evidence...",
       supportSpanIds: [selectedSpanId],
+      isLoading: true,
     };
 
-    setQaMessages([...qaMessages, userMsg, assistantMsg]);
+    setQaMessages((messages) => [...messages, userMsg, pendingMsg]);
     setQaInput("");
     setShowQA(true);
     setTab("qa");
+
+    try {
+      const answer = await askAboutSpan({
+        span,
+        paperTitle,
+        sourceText,
+        question,
+        locale,
+      });
+      setQaMessages((messages) =>
+        messages.map((message) => (message.id === pendingMsg.id ? answer : message)),
+      );
+    } catch {
+      setQaMessages((messages) =>
+        messages.map((message) =>
+          message.id === pendingMsg.id
+            ? {
+                ...pendingMsg,
+                content: text.mockQuestionResponse(
+                  locale === "ko" ? span.translated.slice(0, 40) : span.original.slice(0, 40),
+                ),
+                isLoading: false,
+              }
+            : message,
+        ),
+      );
+    }
   }
 
   return (

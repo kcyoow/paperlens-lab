@@ -1,0 +1,325 @@
+from __future__ import annotations
+
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import gradio as gr
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from .analysis import experiment_card, split_sentences, top_sentences
+from .ingest import PaperSource, build_source, clean_text
+from .model_adapter import DEFAULT_MODEL, generate_with_hf_inference
+from .ui import EXAMPLE_TEXT, build_demo
+
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+FRONTEND_DIR = ROOT_DIR / "frontend"
+FRONTEND_OUT_DIR = FRONTEND_DIR / "out"
+
+
+class PaperInput(BaseModel):
+    arxiv_or_url: str = ""
+    pasted_text: str = ""
+    max_pdf_pages: int = Field(default=10, ge=1, le=32)
+
+
+class AskInput(BaseModel):
+    span_id: str
+    question: str = ""
+    original: str
+    translated: str = ""
+    paper_title: str = "Untitled paper"
+    source_text: str = ""
+    locale: str = "en"
+    use_model: bool = False
+
+
+class ExperimentInput(BaseModel):
+    paper_title: str = "Untitled paper"
+    selected_span: str
+    translated_span: str = ""
+    source_text: str = ""
+    idea: str = ""
+    locale: str = "en"
+    use_model: bool = False
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="PaperLens Lab",
+        description="React reader frontend with a Gradio/Python model backend.",
+        version="0.2.0",
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    _maybe_mount_frontend_assets(app)
+    _register_api(app)
+
+    demo = build_demo()
+    app = gr.mount_gradio_app(app, demo, path="/gradio")
+    _register_frontend_routes(app)
+    return app
+
+
+def _maybe_mount_frontend_assets(app: FastAPI) -> None:
+    next_dir = FRONTEND_OUT_DIR / "_next"
+    if next_dir.exists():
+        app.mount("/_next", StaticFiles(directory=next_dir), name="next-static")
+
+
+def _register_api(app: FastAPI) -> None:
+    @app.get("/api/health")
+    def health() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "frontend_ready": _frontend_ready(),
+            "frontend_dir": str(FRONTEND_OUT_DIR),
+            "gradio_path": "/gradio",
+            "model": DEFAULT_MODEL,
+            "runtime": "react-fastapi-gradio-hybrid",
+        }
+
+    @app.get("/api/sample-paper")
+    def sample_paper() -> dict[str, Any]:
+        source = PaperSource(
+            title="Improving Retrieval-Augmented Generation with Evidence-Linked Reranking",
+            authors="J. Kim, S. Park, M. Lee",
+            source_label="sample",
+            text=EXAMPLE_TEXT,
+        )
+        return paper_document_from_source(source)
+
+    @app.post("/api/paper")
+    def load_paper(payload: PaperInput) -> dict[str, Any]:
+        try:
+            source = build_source(
+                uploaded_pdf=None,
+                arxiv_or_url=payload.arxiv_or_url,
+                pasted_text=payload.pasted_text or EXAMPLE_TEXT,
+                max_pdf_pages=payload.max_pdf_pages,
+            )
+            return paper_document_from_source(source)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/paper/upload")
+    async def upload_paper(
+        pdf: UploadFile = File(...),
+        max_pdf_pages: int = Form(10),
+        arxiv_or_url: str = Form(""),
+    ) -> dict[str, Any]:
+        if not pdf.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Upload a PDF file.")
+
+        suffix = Path(pdf.filename).suffix or ".pdf"
+        with tempfile.NamedTemporaryFile(suffix=suffix) as handle:
+            shutil.copyfileobj(pdf.file, handle)
+            handle.flush()
+            try:
+                source = build_source(
+                    uploaded_pdf=handle.name,
+                    arxiv_or_url=arxiv_or_url,
+                    pasted_text="",
+                    max_pdf_pages=max(1, min(max_pdf_pages, 32)),
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return paper_document_from_source(source)
+
+    @app.post("/api/ask")
+    def ask_question(payload: AskInput) -> dict[str, Any]:
+        question = clean_text(payload.question)
+        if not question:
+            question = (
+                "Explain this selected sentence using only the surrounding paper evidence."
+                if payload.locale == "en"
+                else "선택한 문장을 논문 근거에 맞춰 설명해줘."
+            )
+
+        prompt = _ask_prompt(payload, question)
+        model_text = generate_with_hf_inference(prompt) if payload.use_model else None
+        answer = model_text or _fallback_answer(payload, question)
+        return {
+            "role": "assistant",
+            "content": answer,
+            "supportSpanIds": [payload.span_id],
+            "model": DEFAULT_MODEL if payload.use_model else "fallback-extractive",
+        }
+
+    @app.post("/api/experiment")
+    def build_experiment(payload: ExperimentInput) -> dict[str, str]:
+        source_text = clean_text(payload.source_text or payload.selected_span)
+        idea = clean_text(payload.idea) or (
+            "Test whether the selected paper idea improves a small measurable behavior."
+        )
+        source = PaperSource(
+            title=payload.paper_title,
+            authors="",
+            source_label="frontend-reader",
+            text=f"{payload.selected_span}\n\n{source_text}",
+        )
+        card, starter = experiment_card(source, idea, "Research prototype builder", payload.use_model)
+        return {"card": card, "starter": starter}
+
+
+def _register_frontend_routes(app: FastAPI) -> None:
+    @app.get("/", include_in_schema=False)
+    def index():
+        return _frontend_response("")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def frontend(path: str):
+        if path.startswith(("api/", "gradio", "_next/")):
+            raise HTTPException(status_code=404, detail="Not found")
+        return _frontend_response(path)
+
+
+def _frontend_ready() -> bool:
+    return (FRONTEND_OUT_DIR / "index.html").exists()
+
+
+def _frontend_response(path: str) -> FileResponse | HTMLResponse:
+    if not _frontend_ready():
+        return HTMLResponse(_missing_frontend_html(), status_code=503)
+
+    requested = path.strip("/")
+    candidates = []
+    if not requested:
+        candidates.append(FRONTEND_OUT_DIR / "index.html")
+    else:
+        candidates.extend(
+            [
+                FRONTEND_OUT_DIR / requested,
+                FRONTEND_OUT_DIR / requested / "index.html",
+                FRONTEND_OUT_DIR / f"{requested}.html",
+            ]
+        )
+
+    for candidate in candidates:
+        try:
+            candidate.relative_to(FRONTEND_OUT_DIR)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return FileResponse(candidate)
+
+    return FileResponse(FRONTEND_OUT_DIR / "index.html")
+
+
+def _missing_frontend_html() -> str:
+    return """
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>PaperLens Lab</title>
+        <style>
+          body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #0f172a; }
+          main { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+          section { max-width: 640px; border: 1px solid #e2e8f0; border-radius: 12px; background: white; padding: 28px; box-shadow: 0 18px 60px rgba(15, 23, 42, 0.08); }
+          a { color: #0f766e; font-weight: 700; }
+          code { border-radius: 6px; background: #f1f5f9; padding: 2px 6px; }
+        </style>
+      </head>
+      <body>
+        <main>
+          <section>
+            <h1>PaperLens Lab frontend is not built yet</h1>
+            <p>Run <code>cd frontend && npm ci && npm run build</code>, then restart <code>python app.py</code>.</p>
+            <p>The Gradio fallback remains available at <a href="/gradio">/gradio</a>.</p>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+
+
+def paper_document_from_source(source: PaperSource) -> dict[str, Any]:
+    sentences = split_sentences(source.text)
+    if not sentences:
+        sentences = [source.text]
+    sentences = sentences[:48]
+
+    section_count = min(5, max(1, (len(sentences) + 5) // 6))
+    sections = []
+    cursor = 0
+    for section_index in range(section_count):
+        remaining = len(sentences) - cursor
+        take = max(1, (remaining + section_count - section_index - 1) // (section_count - section_index))
+        section_sentences = sentences[cursor : cursor + take]
+        cursor += take
+        paragraph_spans = [
+            {
+                "id": f"P{section_index}.S{span_index + 1}",
+                "original": sentence,
+                "translated": _translation_placeholder(sentence),
+            }
+            for span_index, sentence in enumerate(section_sentences)
+        ]
+        sections.append(
+            {
+                "id": f"sec-{section_index + 1}",
+                "title": "Loaded Paper" if section_index == 0 else f"Source Extract {section_index + 1}",
+                "titleKo": "불러온 논문" if section_index == 0 else f"원문 추출 {section_index + 1}",
+                "paragraphs": [{"id": f"P{section_index}", "spans": paragraph_spans}],
+            }
+        )
+
+    return {
+        "id": source.source_label.replace(":", "-").replace("/", "-").lower() or "paper",
+        "title": source.title or "Untitled paper",
+        "titleKo": source.title or "번역 제목 생성 대기",
+        "authors": [item.strip() for item in source.authors.split(",") if item.strip()] or ["Unknown authors"],
+        "source": source.source_label,
+        "sections": sections,
+    }
+
+
+def _translation_placeholder(sentence: str) -> str:
+    return f"[Korean draft pending] {sentence}"
+
+
+def _ask_prompt(payload: AskInput, question: str) -> str:
+    evidence = "\n".join(sentence.text for sentence in top_sentences(payload.source_text, limit=5))
+    return f"""You are PaperLens Lab. Answer the user's question about a selected paper sentence.
+Rules:
+- Use the selected sentence and source evidence first.
+- Say when something is an interpretation beyond the paper.
+- Keep the answer concise.
+
+Paper: {payload.paper_title}
+Selected sentence ({payload.span_id}): {payload.original}
+Available translation: {payload.translated}
+Question: {question}
+Evidence:
+{evidence}
+"""
+
+
+def _fallback_answer(payload: AskInput, question: str) -> str:
+    evidence = top_sentences(payload.source_text or payload.original, limit=3)
+    evidence_hint = " ".join(f"S{item.pid}" for item in evidence) or payload.span_id
+    if payload.locale == "ko":
+        return (
+            f"백엔드가 선택 문장 `{payload.span_id}`를 기준으로 답했습니다. "
+            f"질문은 \"{question}\"이고, 핵심 원문은 \"{payload.original[:180]}\"입니다. "
+            f"현재는 소형 모델 토큰이 없어 fallback extractive 모드이며, 근거 후보는 {evidence_hint}입니다."
+        )
+    return (
+        f"The backend answered from selected span `{payload.span_id}`. "
+        f"For \"{question}\", the key source sentence is \"{payload.original[:180]}\". "
+        f"This is fallback extractive mode until model inference is enabled; candidate evidence: {evidence_hint}."
+    )
