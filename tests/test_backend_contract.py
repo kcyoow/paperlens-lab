@@ -18,6 +18,14 @@ class BackendContractTests(unittest.TestCase):
         os.environ.pop("PAPERLENS_TRACE_PATH", None)
         self.tempdir.cleanup()
 
+    def test_health_exposes_runtime_switches(self):
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("provider", body)
+        self.assertIn("forceModel", body)
+        self.assertIn("traceContent", body)
+
     def test_paper_endpoint_preserves_reader_shape(self):
         response = self.client.post(
             "/api/paper",
@@ -58,6 +66,7 @@ class BackendContractTests(unittest.TestCase):
         self.assertIn("content", body)
         self.assertIn("P0.S1", body["supportSpanIds"])
         self.assertIn("traceId", body)
+        self.assertTrue(body["usedFallback"])
 
     def test_experiment_and_growth_endpoints_are_structured(self):
         experiment = self.client.post(

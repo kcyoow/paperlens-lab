@@ -67,10 +67,30 @@ quality-booster candidates.
 Useful runtime switches:
 
 - `PAPERLENS_PROVIDER=fallback|hf|modal`
+- `PAPERLENS_FORCE_MODEL=1` to make the backend use the configured provider even when the static frontend was built with model mode off
 - `PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507`
-- `PAPERLENS_QUALITY_MODEL=mistralai/Mistral-Small-3.2-24B-Instruct-2506`
+- `PAPERLENS_QUALITY_MODEL=...` for an optional Modal/vLLM quality model; defaults to `PAPERLENS_MODEL`
 - `PAPERLENS_TRACE_PATH=outputs/agent_traces.jsonl`
+- `PAPERLENS_TRACE_CONTENT=1` to opt into logging prompt/output text for evaluation or fine-tuning data; default traces store metadata only
 - `NEXT_PUBLIC_PAPERLENS_USE_MODEL=1` for the exported React frontend
+
+## Backend Scenario Checks
+
+Run deterministic fallback checks:
+
+```bash
+PAPERLENS_TRACE_ENABLED=0 .venv/bin/python -m paperlens_lab.scenario_runner --compact
+```
+
+Run the same translation -> Q&A -> ExperimentSpec -> Growth path through the
+configured small model:
+
+```bash
+PAPERLENS_PROVIDER=hf \
+PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+.venv/bin/python -m paperlens_lab.scenario_runner --use-model --compact
+```
 
 ## Local Run
 

@@ -54,4 +54,5 @@ export interface QAMessage {
   provider?: string;
   traceId?: string;
   error?: string | null;
+  usedFallback?: boolean;
 }

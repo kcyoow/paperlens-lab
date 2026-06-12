@@ -113,7 +113,15 @@ export default function LabModal({ span, locale, paperTitle, sourceText, onClose
           });
           if (cancelled) return;
           setGrowthIdeas(growth.ideas.map((idea) => idea.idea));
-          setGrowthStatus(`Growth ready (${growth.fineTuningSignal})`);
+          if (growth.error || growth.ideas.length === 0) {
+            setGrowthStatus(locale === "ko" ? "Growth fallback 확인 필요" : "Growth fallback needs review");
+          } else {
+            setGrowthStatus(
+              growth.usedFallback
+                ? `Growth ready (fallback, ${growth.fineTuningSignal})`
+                : `Growth ready (${growth.fineTuningSignal})`,
+            );
+          }
         } catch {
           if (cancelled) return;
           setGrowthStatus(locale === "ko" ? "Growth 생성 실패" : "Growth unavailable");

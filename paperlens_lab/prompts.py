@@ -50,6 +50,11 @@ Available translation: {translated_span}
 Question: {question}
 Neighbor evidence:
 {json.dumps(evidence, ensure_ascii=False, indent=2)}
+
+Rules:
+- Avoid strong words such as proves, guarantees, SOTA, 증명, 입증, 최고 unless the evidence literally says that.
+- Prefer "suggests", "shows within this evidence", or Korean equivalents such as "보여준다" / "시사한다".
+- If the student's question asks for a broader claim than the evidence supports, set needs_more_context to true and confidence to low or medium.
 """
 
 
@@ -86,6 +91,12 @@ Selected span: {selected_span}
 Available translation: {translated_span}
 Evidence:
 {json.dumps(source_evidence, ensure_ascii=False, indent=2)}
+
+Rules:
+- The dataset must be a public, toy, hand-built, or fallback dataset a student can use in 30-60 minutes.
+- The failure_condition must explicitly name the metric and say what metric outcome would falsify the mini-lab.
+- The expected_result must be modest; do not promise that the paper's original delta will reproduce.
+- The ablation should isolate one variable.
 """
 
 
@@ -117,8 +128,14 @@ Return only valid JSON:
 Paper: {paper_title}
 Locale: {locale}
 Selected span: {selected_span}
+Mini-lab result evidence id: run:r1
 Mini-lab result:
 {mini_lab_result}
 Paper memories:
 {json.dumps(paper_memory, ensure_ascii=False, indent=2)}
+
+Rules:
+- Each idea must include at least one paper memory id and `run:r1` in source_evidence.
+- Do not call fine-tuning recommended just because an idea is promising; use recommended only for repeated observed model-output failures.
+- Keep each next step low-cost and directly testable.
 """

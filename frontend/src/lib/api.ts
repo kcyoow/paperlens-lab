@@ -21,6 +21,7 @@ export interface ExperimentResult {
   provider?: string;
   traceId?: string;
   error?: string | null;
+  usedFallback?: boolean;
 }
 
 export interface GrowthResult {
@@ -37,6 +38,7 @@ export interface GrowthResult {
   provider?: string;
   traceId?: string;
   error?: string | null;
+  usedFallback?: boolean;
 }
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -111,6 +113,7 @@ export async function askAboutSpan(params: {
     provider?: string;
     traceId?: string;
     error?: string | null;
+    usedFallback?: boolean;
   }>(response);
   return {
     id: `qa-${Date.now()}`,
@@ -122,6 +125,7 @@ export async function askAboutSpan(params: {
     provider: body.provider,
     traceId: body.traceId,
     error: body.error,
+    usedFallback: body.usedFallback,
   };
 }
 

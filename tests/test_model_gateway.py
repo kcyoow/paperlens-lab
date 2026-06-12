@@ -121,7 +121,27 @@ class ModelGatewayTests(unittest.TestCase):
 
         lines = self.trace_path.read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(len(lines), 4)
-        self.assertNotIn("HF_TOKEN", self.trace_path.read_text(encoding="utf-8"))
+        trace_text = self.trace_path.read_text(encoding="utf-8")
+        self.assertNotIn("HF_TOKEN", trace_text)
+        self.assertNotIn("We improve F1 by 3.2 points", trace_text)
+
+    def test_invalid_model_output_falls_back_to_structured_result(self):
+        gateway = ModelGateway(provider="hf", call_model=lambda *_: '{"unexpected": "shape"}')
+        result = gateway.answer_span(
+            "Demo Paper",
+            "P0.S1",
+            "We improve F1 by 3.2 points.",
+            "",
+            "무슨 뜻이야?",
+            "We improve F1 by 3.2 points.",
+            "ko",
+            use_model=True,
+        )
+
+        self.assertTrue(result.used_fallback)
+        self.assertIn("invalid model output", result.error or "")
+        self.assertIn("answer", result.data)
+        self.assertIn("P0.S1", result.data["evidence"][0]["source_id"])
 
     def test_fallback_paths_are_structured(self):
         gateway = ModelGateway()

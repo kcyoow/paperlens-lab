@@ -39,13 +39,20 @@ def tracing_enabled() -> bool:
     return os.getenv("PAPERLENS_TRACE_ENABLED", "1").lower() not in {"0", "false", "no"}
 
 
+def trace_content_enabled() -> bool:
+    return os.getenv("PAPERLENS_TRACE_CONTENT", "0").lower() in {"1", "true", "yes"}
+
+
 def write_trace(record: TraceRecord) -> None:
     if not tracing_enabled():
         return
-    path = trace_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_jsonable(record), ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        path = trace_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_jsonable(record), ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        return
 
 
 def _jsonable(value: Any) -> Any:

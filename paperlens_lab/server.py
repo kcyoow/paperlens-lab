@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from .analysis import experiment_card, split_sentences, top_sentences
 from .ingest import PaperSource, build_source, clean_text
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
+from .tracing import trace_content_enabled
 from .ui import EXAMPLE_TEXT, build_demo
 
 
@@ -108,6 +109,8 @@ def _register_api(app: FastAPI) -> None:
             "gradio_path": "/gradio",
             "model": DEFAULT_MODEL,
             "provider": DEFAULT_PROVIDER,
+            "forceModel": _force_model_enabled(),
+            "traceContent": trace_content_enabled(),
             "runtime": "react-fastapi-gradio-hybrid",
         }
 
@@ -184,6 +187,7 @@ def _register_api(app: FastAPI) -> None:
             "provider": result.provider,
             "traceId": result.trace_id,
             "error": result.error,
+            "usedFallback": result.used_fallback,
         }
 
     @app.post("/api/ask")
@@ -215,6 +219,7 @@ def _register_api(app: FastAPI) -> None:
             "provider": result.provider,
             "traceId": result.trace_id,
             "error": result.error,
+            "usedFallback": result.used_fallback,
         }
 
     @app.post("/api/experiment")
@@ -249,6 +254,7 @@ def _register_api(app: FastAPI) -> None:
             "provider": result.provider,
             "traceId": result.trace_id,
             "error": result.error,
+            "usedFallback": result.used_fallback,
         }
 
     @app.post("/api/growth")
@@ -270,6 +276,7 @@ def _register_api(app: FastAPI) -> None:
             "provider": result.provider,
             "traceId": result.trace_id,
             "error": result.error,
+            "usedFallback": result.used_fallback,
         }
 
 
@@ -426,7 +433,11 @@ def _span_id(section_index: int, span_index: int) -> str:
 
 
 def _should_use_model(requested: bool) -> bool:
-    return requested or os.getenv("PAPERLENS_FORCE_MODEL", "").lower() in {"1", "true", "yes"}
+    return requested or _force_model_enabled()
+
+
+def _force_model_enabled() -> bool:
+    return os.getenv("PAPERLENS_FORCE_MODEL", "").lower() in {"1", "true", "yes"}
 
 
 def _support_ids(data: dict[str, Any], fallback_span_id: str) -> list[str]:

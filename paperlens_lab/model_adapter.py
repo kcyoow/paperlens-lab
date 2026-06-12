@@ -12,12 +12,12 @@ import requests
 
 from .ingest import clean_text
 from .prompts import experiment_prompt, growth_prompt, qa_prompt, translation_prompt
-from .tracing import TraceRecord, new_trace_id, write_trace
+from .tracing import TraceRecord, new_trace_id, trace_content_enabled, write_trace
 
 
 DEFAULT_MODEL = os.getenv("PAPERLENS_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
 DEFAULT_PROVIDER = os.getenv("PAPERLENS_PROVIDER", "fallback")
-QUALITY_MODEL = os.getenv("PAPERLENS_QUALITY_MODEL", "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
+QUALITY_MODEL = os.getenv("PAPERLENS_QUALITY_MODEL", DEFAULT_MODEL)
 
 
 @dataclass
@@ -30,6 +30,7 @@ class ModelResult:
     trace_id: str
     error: str | None = None
     raw: str = ""
+    used_fallback: bool = False
 
 
 @dataclass
@@ -38,7 +39,8 @@ class ModelGateway:
     model_id: str = DEFAULT_MODEL
     quality_model_id: str = QUALITY_MODEL
     call_model: Callable[[str, str, int], str | None] | None = None
-    trace_inputs: bool = True
+    trace_inputs: bool = field(default_factory=trace_content_enabled)
+    trace_outputs: bool = field(default_factory=trace_content_enabled)
     last_errors: list[str] = field(default_factory=list)
 
     def translate_spans(
@@ -219,6 +221,7 @@ class ModelGateway:
         model_id = self.quality_model_id if quality and use_model else self.model_id
         raw = ""
         error = None
+        used_fallback = not use_model
 
         if use_model:
             try:
@@ -230,11 +233,20 @@ class ModelGateway:
         if raw:
             data = _parse_json_object(raw)
             if data:
-                text = _format_task_text(task, data)
+                schema_errors = _validate_task_data(task, data)
+                if schema_errors:
+                    text, data = fallback()
+                    used_fallback = True
+                    error = f"invalid model output for {task}: {', '.join(schema_errors)}; fallback used"
+                else:
+                    text = _format_task_text(task, data)
             else:
-                text, data = raw.strip(), {"raw_text": raw.strip()}
+                text, data = fallback()
+                used_fallback = True
+                error = f"model returned non-JSON output for {task}; fallback used"
         else:
             text, data = fallback()
+            used_fallback = True
             if error is None and use_model:
                 error = "model returned empty output; fallback used"
 
@@ -248,6 +260,7 @@ class ModelGateway:
             trace_id=trace_id,
             error=error,
             raw=raw,
+            used_fallback=used_fallback,
         )
         write_trace(
             TraceRecord(
@@ -256,10 +269,10 @@ class ModelGateway:
                 task=task,
                 provider=result.provider,
                 model=result.model,
-                status="fallback" if not raw else "model",
+                status="fallback" if result.used_fallback else "model",
                 latency_ms=latency_ms,
-                input={"prompt": prompt if self.trace_inputs else prompt[:800]},
-                output={"text": result.text[:4000], "data": result.data},
+                input=_trace_input(prompt, self.trace_inputs),
+                output=_trace_output(result, self.trace_outputs),
                 error=error,
             )
         )
@@ -406,6 +419,70 @@ def _format_task_text(task: str, data: dict[str, Any]) -> str:
     if task == "research_growth":
         return format_growth_ideas(data)
     return json.dumps(data, ensure_ascii=False)
+
+
+def _validate_task_data(task: str, data: dict[str, Any]) -> list[str]:
+    if task == "translation":
+        translations = data.get("translations")
+        if not isinstance(translations, list) or not translations:
+            return ["missing translations"]
+        errors = []
+        for idx, item in enumerate(translations, start=1):
+            if not isinstance(item, dict):
+                errors.append(f"translation {idx} is not an object")
+                continue
+            if not item.get("span_id"):
+                errors.append(f"translation {idx} missing span_id")
+            if not item.get("translation"):
+                errors.append(f"translation {idx} missing translation")
+        return errors
+    if task == "grounded_qa":
+        errors = []
+        if not data.get("answer"):
+            errors.append("missing answer")
+        if data.get("confidence") not in {"high", "medium", "low"}:
+            errors.append("missing confidence")
+        evidence = data.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            errors.append("missing evidence")
+        return errors
+    if task == "experiment_spec":
+        required = ("research_question", "mini_lab_goal", "dataset", "baseline", "metric", "steps")
+        errors = [f"missing {key}" for key in required if not data.get(key)]
+        if data.get("steps") and not isinstance(data["steps"], list):
+            errors.append("steps must be a list")
+        return errors
+    if task == "research_growth":
+        ideas = data.get("ideas")
+        if not isinstance(ideas, list) or not ideas:
+            return ["missing ideas"]
+        errors = []
+        for idx, idea in enumerate(ideas, start=1):
+            if not isinstance(idea, dict):
+                errors.append(f"idea {idx} is not an object")
+                continue
+            for key in ("idea", "source_evidence", "testable_next_step", "risk"):
+                if not idea.get(key):
+                    errors.append(f"idea {idx} missing {key}")
+        return errors
+    return []
+
+
+def _trace_input(prompt: str, include_content: bool) -> dict[str, Any]:
+    if include_content:
+        return {"prompt": prompt, "content_logged": True}
+    return {"prompt_chars": len(prompt), "content_logged": False}
+
+
+def _trace_output(result: ModelResult, include_content: bool) -> dict[str, Any]:
+    if include_content:
+        return {"text": result.text[:4000], "data": result.data, "content_logged": True}
+    return {
+        "text_chars": len(result.text),
+        "data_keys": sorted(str(key) for key in result.data.keys()),
+        "used_fallback": result.used_fallback,
+        "content_logged": False,
+    }
 
 
 def _parse_json_object(raw: str) -> dict[str, Any] | None:

@@ -239,6 +239,25 @@ export default function RightPanel({
                         ))}
                       </div>
                     )}
+                    {msg.role === "assistant" && (msg.provider || msg.usedFallback || msg.error) && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {msg.provider && (
+                          <span className="rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] text-text-muted">
+                            {msg.provider}
+                          </span>
+                        )}
+                        {msg.usedFallback && (
+                          <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] text-yellow-700">
+                            fallback
+                          </span>
+                        )}
+                        {msg.error && (
+                          <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] text-red-700">
+                            check output
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
