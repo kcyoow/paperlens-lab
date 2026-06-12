@@ -58,6 +58,7 @@ export interface ValidationSummary {
     evaluationTotal: number;
     evidenceConsistencyPassed?: boolean;
     evidenceConsistencyIssues?: string[];
+    growthIterationPassed?: boolean;
     fineTuningRecommendation: string;
     fineTuningReason: string;
     papers: Array<{
@@ -82,6 +83,10 @@ export interface ValidationSummary {
       evaluationsTotal: number;
       evaluations?: Array<{ name: string; passed: boolean; reasons: string[] }>;
       memoryRecordsAfterGrowth: number;
+      memoryRecordsBeforeGrowthIteration?: number;
+      growthIterationPassed?: boolean;
+      growthIterationEvidence?: string[];
+      growthIterationIdeaEvidence?: string[][];
     }>;
   } | null;
   modelTraces?: {
@@ -157,10 +162,10 @@ export async function loadPaper(input: PaperLoadInput): Promise<PaperDocument> {
     body: JSON.stringify({
       arxiv_or_url: input.arxiv_or_url ?? "",
       pasted_text: input.pasted_text ?? "",
-      max_pdf_pages: input.max_pdf_pages ?? 10,
+      max_pdf_pages: input.max_pdf_pages ?? 64,
       use_model: input.use_model ?? USE_MODEL,
       max_translate_spans: input.max_translate_spans ?? 24,
-      max_reader_spans: input.max_reader_spans ?? 180,
+      max_reader_spans: input.max_reader_spans ?? 800,
     }),
   });
   return parseJson<PaperDocument>(response);
@@ -174,13 +179,13 @@ export async function loadValidationSummary(): Promise<ValidationSummary> {
   return parseJson<ValidationSummary>(response);
 }
 
-export async function uploadPaper(file: File, maxPdfPages = 10): Promise<PaperDocument> {
+export async function uploadPaper(file: File, maxPdfPages = 64): Promise<PaperDocument> {
   const formData = new FormData();
   formData.set("pdf", file);
   formData.set("max_pdf_pages", String(maxPdfPages));
   formData.set("use_model", String(USE_MODEL));
   formData.set("max_translate_spans", "24");
-  formData.set("max_reader_spans", "180");
+  formData.set("max_reader_spans", "800");
 
   const response = await fetch(`${API_BASE}/api/paper/upload`, {
     method: "POST",

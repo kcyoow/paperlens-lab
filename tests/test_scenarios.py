@@ -57,6 +57,36 @@ class ScenarioEvalTests(unittest.TestCase):
 
         self.assertTrue(result.passed, result.reasons)
 
+    def test_translation_allows_localized_figure_marker(self):
+        result = evaluate_translation(
+            "A very low rank (i.e., r in Figure 1 can be one or two) suffices.",
+            {
+                "translations": [
+                    {
+                        "span_id": "P0.S1",
+                        "translation": "매우 낮은 랭크, 즉 그림 1에서 r이 1 또는 2이면 충분하다.",
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(result.passed, result.reasons)
+
+    def test_translation_allows_qa_as_korean_question_answering(self):
+        result = evaluate_translation(
+            "The model obtains strong results on open-domain QA.",
+            {
+                "translations": [
+                    {
+                        "span_id": "P0.S1",
+                        "translation": "이 모델은 오픈 도메인 질문 응답에서 강한 결과를 얻었다.",
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(result.passed, result.reasons)
+
     def test_translation_still_rejects_unsupported_proof_claims(self):
         result = evaluate_translation(
             "The method improves F1 in a toy setting.",
@@ -112,6 +142,27 @@ class ScenarioEvalTests(unittest.TestCase):
             "P0.S1",
             source_evidence={"P0.S1": "We experiment with RAG in a wide range of tasks."},
         )
+        self.assertTrue(result.passed, result.reasons)
+
+    def test_grounded_qa_allows_pdf_ligature_and_spacing_normalization(self):
+        result = evaluate_grounded_qa(
+            {
+                "answer": "The source says a low rank can suffice.",
+                "evidence": [
+                    {
+                        "source_id": "P0.S1",
+                        "quote": "a very low rank (i.e., r in Figure 1 can be one or two) suffices",
+                    }
+                ],
+                "confidence": "medium",
+                "needs_more_context": False,
+            },
+            "P0.S1",
+            source_evidence={
+                "P0.S1": "a very low rank (i.e.,r in Figure 1 can be one or two) sufﬁces even"
+            },
+        )
+
         self.assertTrue(result.passed, result.reasons)
 
     def test_grounded_qa_rejects_unknown_evidence_ids(self):

@@ -6,7 +6,12 @@ from pathlib import Path
 
 from paperlens_lab.ingest import PaperSource
 from paperlens_lab.model_adapter import ModelGateway
-from paperlens_lab.real_paper_runner import RealPaperCase, _selected_spans, run_real_paper_case
+from paperlens_lab.real_paper_runner import (
+    RealPaperCase,
+    _selected_spans,
+    evaluate_growth_iteration,
+    run_real_paper_case,
+)
 
 
 class RealPaperRunnerTests(unittest.TestCase):
@@ -103,6 +108,37 @@ class RealPaperRunnerTests(unittest.TestCase):
         self.assertEqual(result["fine_tuning"]["recommendation"], "no")
         self.assertIn("Model-backed validation was not enabled", result["fine_tuning"]["reason"])
 
+    def test_growth_iteration_requires_same_idea_to_cite_memory_run_and_paper(self):
+        memories = [
+            {"id": "paper:selected-middle", "kind": "paper_span"},
+            {"id": "run:r1", "kind": "mini_lab_result"},
+            {"id": "growth_idea:abc123", "kind": "growth_idea"},
+        ]
+        result = evaluate_growth_iteration(
+            {
+                "ideas": [
+                    {
+                        "idea": "Use only the prior idea.",
+                        "source_evidence": ["growth_idea:abc123"],
+                        "novelty_angle": "narrow",
+                        "testable_next_step": "run a toy split",
+                        "risk": "thin evidence",
+                    },
+                    {
+                        "idea": "Use only the paper and run.",
+                        "source_evidence": ["paper:selected-middle", "run:r1"],
+                        "novelty_angle": "narrow",
+                        "testable_next_step": "run a toy split",
+                        "risk": "thin evidence",
+                    },
+                ]
+            },
+            memories,
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("together", " ".join(result.reasons))
+
     def fake_call(self, prompt: str, model_id: str, max_new_tokens: int):
         if '"translations"' in prompt:
             return json.dumps(
@@ -166,7 +202,7 @@ class RealPaperRunnerTests(unittest.TestCase):
                 "ideas": [
                     {
                         "idea": "Test whether the F1 gain appears only on evidence-heavy examples.",
-                        "source_evidence": ["paper:selected-middle", "run:r1"],
+                        "source_evidence": self._growth_evidence_ids(prompt),
                         "novelty_angle": "Use the mini-lab result to narrow the paper claim.",
                         "testable_next_step": "Bucket ten examples by evidence density and compare F1 deltas.",
                         "risk": "Manual buckets may be noisy.",
@@ -219,6 +255,15 @@ class RealPaperRunnerTests(unittest.TestCase):
 
         match = re.search(r"Long evidence packet:\n(.*?)\n\nThe packet intentionally", prompt, re.DOTALL)
         return json.loads(match.group(1)) if match else []
+
+    def _growth_evidence_ids(self, prompt):
+        import re
+
+        growth_ids = re.findall(r'"id":\s*"(growth_idea:[^"]+)"', prompt)
+        evidence = ["paper:selected-middle", "run:r1"]
+        if growth_ids:
+            evidence.insert(1, growth_ids[0])
+        return evidence
 
     def _selected_span_id(self, prompt):
         import re

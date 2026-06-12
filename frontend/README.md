@@ -38,7 +38,7 @@ npm run preview:static
 - API calls go to the same origin under `/api/*`.
 - `src/lib/mock-data.ts` remains the offline fallback when no paper is loaded.
 - PDF parsing, arXiv fetching, selected-span Q&A, and experiment card generation are connected to the Python backend.
-- Full translation generation is still a staged model feature; dynamically loaded papers currently show Korean draft placeholders.
+- On-demand span translation is connected through `/api/translate-span`; full-document batch translation remains a staged model feature.
 - UI text is handled by the local `src/lib/i18n.ts` dictionary.
 - Generated folders such as `.next/`, `out/`, and `node_modules/` are intentionally ignored.
 

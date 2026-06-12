@@ -329,6 +329,11 @@ function ValidationEvidencePanel({
   const papers = realPaperRun?.papers?.map((paper) => paper.arxiv || paper.name).filter(Boolean) ?? [];
   const firstPaper = realPaperRun?.papers?.[0];
   const litm = firstPaper?.adversarialLitm;
+  const growthEvidence = firstPaper?.growthIterationEvidence ?? [];
+  const growthLoopOk =
+    realPaperRun?.growthIterationPassed === true &&
+    growthEvidence.some((item) => item.startsWith("growth_idea:")) &&
+    growthEvidence.includes("run:r1");
   const scope = firstPaper
     ? `${firstPaper.pageMarkers} parsed pages · ${firstPaper.readerSpans}/${firstPaper.totalSentenceCount || firstPaper.readerSpans} reader spans`
     : "no scope";
@@ -405,6 +410,12 @@ function ValidationEvidencePanel({
             {locale === "ko" ? "긴 문맥" : "Long context"}:
           </span>{" "}
           {litm?.target_span_id || "n/a"} · {litm?.context_chars ?? 0} chars · {litmRatio} offset
+        </p>
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "Growth 루프" : "Growth loop"}:
+          </span>{" "}
+          {growthLoopOk ? "paper + run:r1 + prior idea" : "rerun needed"}
         </p>
       </div>
 

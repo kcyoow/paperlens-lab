@@ -43,7 +43,7 @@ def evaluate_translation(
         if number not in joined:
             reasons.append(f"changed or dropped number {number}")
     for marker in _citation_markers(source):
-        if marker not in joined:
+        if not _marker_preserved(marker, joined):
             reasons.append(f"changed or dropped citation/table marker {marker}")
     for term in _technical_terms(source):
         if not _term_preserved(term, joined):
@@ -89,7 +89,7 @@ def evaluate_grounded_qa(
             source_id = item.get("source_id")
             quote = str(item.get("quote", "")).strip()
             source_text = source_evidence.get(str(source_id), "")
-            if quote and source_text and quote not in source_text:
+            if quote and source_text and not source_contains_quote(source_text, quote):
                 reasons.append(f"quote for {source_id} is not in source evidence")
     joined_evidence = " ".join(source_evidence.values()) if source_evidence else ""
     if _adds_unsupported_strength(joined_evidence, answer):
@@ -225,6 +225,41 @@ def _citation_markers(text: str) -> list[str]:
     return markers
 
 
+def _marker_preserved(marker: str, output: str) -> bool:
+    if marker in output:
+        return True
+    match = re.fullmatch(r"(Table|Figure|Fig\.)\s+(\d+)", marker)
+    if not match:
+        return False
+    label, number = match.groups()
+    if label == "Table":
+        return bool(re.search(rf"(?:Table|표)\s*{re.escape(number)}(?!\d)", output, re.IGNORECASE))
+    return bool(re.search(rf"(?:Figure|Fig\.|그림)\s*{re.escape(number)}(?!\d)", output, re.IGNORECASE))
+
+
+def source_contains_quote(source_text: str, quote: str) -> bool:
+    if quote in source_text:
+        return True
+    return _quote_match_text(quote) in _quote_match_text(source_text)
+
+
+def _quote_match_text(text: str) -> str:
+    replacements = {
+        "\ufb00": "ff",
+        "\ufb01": "fi",
+        "\ufb02": "fl",
+        "\ufb03": "ffi",
+        "\ufb04": "ffl",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([,.;:)\]])", r"\1", text)
+    text = re.sub(r"([(\[])\s+", r"\1", text)
+    text = re.sub(r",(?=[A-Za-z0-9])", ", ", text)
+    return text.strip().casefold()
+
+
 def _technical_terms(text: str) -> list[str]:
     import re
 
@@ -313,6 +348,11 @@ def _term_preserved(term: str, output: str) -> bool:
     term_lower = term.lower()
     output_lower = output.lower()
     if term_lower in output_lower:
+        return True
+    equivalents = {
+        "qa": ("question answering", "질문 응답", "질의응답", "질문응답", "문답"),
+    }
+    if any(alias in output_lower for alias in equivalents.get(term_lower, ())):
         return True
     if term_lower.endswith("s") and len(term_lower) > 3 and term_lower[:-1] in output_lower:
         return True

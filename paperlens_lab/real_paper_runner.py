@@ -166,13 +166,42 @@ def run_real_paper_case(
             kind="growth_idea",
             payload={"paper_title": document["title"], "idea": idea},
         )
+    iteration_memories = load_memories(paper_id)
+    growth_iteration = gateway.growth_ideas(
+        paper_title=document["title"],
+        paper_memory=iteration_memories,
+        mini_lab_result=(
+            f"{experiment.text}\n\n"
+            "Follow-up observation: the first mini-lab result should be narrowed into a second test "
+            "that uses both the paper span and the previous growth idea as evidence."
+        ),
+        selected_span=selected[len(selected) // 2]["original"] if selected else "",
+        locale=locale,
+        use_model=use_model,
+    )
+    for idea in growth_iteration.data.get("ideas", []):
+        append_memory(
+            paper_id,
+            kind="growth_iteration_idea",
+            payload={"paper_title": document["title"], "idea": idea},
+        )
 
     evals = [
         evaluate_pdf_parse(source, document, spans),
-        *_evaluate_run(selected, translations.data, qa_runs, experiment.data, growth.data, memories, litm_probe),
+        *_evaluate_run(
+            selected,
+            translations.data,
+            qa_runs,
+            experiment.data,
+            growth.data,
+            memories,
+            litm_probe,
+            growth_iteration.data,
+            iteration_memories,
+        ),
     ]
     if use_model:
-        evals.append(evaluate_model_backing(translations, qa_runs, experiment, growth, litm_probe))
+        evals.append(evaluate_model_backing(translations, qa_runs, experiment, growth, litm_probe, growth_iteration))
     failures = _failure_records(case.name, evals, qa_runs, experiment, growth)
     result = {
         "case": asdict(case),
@@ -209,10 +238,12 @@ def run_real_paper_case(
             "adversarial_litm": litm_probe,
             "experiment": _public_result(experiment),
             "growth": _public_result(growth),
+            "growth_iteration": _public_result(growth_iteration),
         },
         "memory": {
             "paper_id": paper_id,
             "records_before_growth": len(memories),
+            "records_before_growth_iteration": len(iteration_memories),
             "records_after_growth": len(load_memories(paper_id)),
         },
     }
@@ -574,6 +605,8 @@ def _evaluate_run(
     growth_data: dict[str, Any],
     memories: list[dict[str, Any]],
     litm_probe: dict[str, Any] | None = None,
+    growth_iteration_data: dict[str, Any] | None = None,
+    iteration_memories: list[dict[str, Any]] | None = None,
 ) -> list[EvalResult]:
     evals: list[EvalResult] = []
     expected_ids = [item["id"] for item in selected]
@@ -601,7 +634,41 @@ def _evaluate_run(
     known_ids = {item.get("id", "") for item in memories}
     known_ids.update({"paper:selected-middle", "run:r1"})
     evals.append(evaluate_growth_ideas(growth_data, known_evidence_ids=known_ids, require_multiple_sources=True))
+    if growth_iteration_data is not None:
+        evals.append(evaluate_growth_iteration(growth_iteration_data, iteration_memories or []))
     return evals
+
+
+def evaluate_growth_iteration(data: dict[str, Any], memories: list[dict[str, Any]]) -> EvalResult:
+    reasons: list[str] = []
+    known_ids = {str(item.get("id", "")) for item in memories}
+    known_ids.update({"paper:selected-middle", "run:r1"})
+    base = evaluate_growth_ideas(data, known_evidence_ids=known_ids, require_multiple_sources=True)
+    reasons.extend(base.reasons)
+    prior_growth_ids = {
+        str(item.get("id", ""))
+        for item in memories
+        if str(item.get("kind", "")) == "growth_idea" and str(item.get("id", "")).startswith("growth_idea:")
+    }
+    if not prior_growth_ids:
+        reasons.append("growth iteration has no prior growth_idea memory to reuse")
+    ideas = data.get("ideas", []) if isinstance(data.get("ideas"), list) else []
+    has_complete_iteration_idea = False
+    for idea in ideas:
+        if not isinstance(idea, dict):
+            continue
+        evidence_ids = {str(source_id) for source_id in idea.get("source_evidence") or []}
+        cites_prior_growth = bool(evidence_ids & prior_growth_ids)
+        cites_run = "run:r1" in evidence_ids
+        cites_paper = "paper:selected-middle" in evidence_ids or any(
+            source_id.startswith("paper:") for source_id in evidence_ids
+        )
+        if cites_prior_growth and cites_run and cites_paper:
+            has_complete_iteration_idea = True
+            break
+    if not has_complete_iteration_idea:
+        reasons.append("no growth iteration idea cites paper memory, run:r1, and a prior growth_idea together")
+    return EvalResult("research_growth_iteration", not reasons, reasons)
 
 
 def evaluate_pdf_parse(source: PaperSource, document: dict[str, Any], spans: list[dict[str, Any]]) -> EvalResult:
@@ -696,6 +763,7 @@ def evaluate_model_backing(
     experiment: Any,
     growth: Any,
     litm_probe: dict[str, Any] | None = None,
+    growth_iteration: Any | None = None,
 ) -> EvalResult:
     reasons: list[str] = []
     if translation.used_fallback:
@@ -709,6 +777,8 @@ def evaluate_model_backing(
         reasons.append("growth used fallback")
     if litm_probe and (litm_probe.get("result") or {}).get("used_fallback"):
         reasons.append("adversarial long-context QA used fallback")
+    if growth_iteration and growth_iteration.used_fallback:
+        reasons.append("growth iteration used fallback")
     return EvalResult("model_backing", not reasons, reasons)
 
 

@@ -33,14 +33,16 @@ class ValidationReportTests(unittest.TestCase):
 
         self.assertTrue(summary["ok"])
         self.assertEqual(summary["realPaperRun"]["paperCount"], 3)
-        self.assertEqual(summary["realPaperRun"]["evaluationPassed"], 9)
-        self.assertEqual(summary["realPaperRun"]["evaluationTotal"], 9)
+        self.assertEqual(summary["realPaperRun"]["evaluationPassed"], 12)
+        self.assertEqual(summary["realPaperRun"]["evaluationTotal"], 12)
         self.assertTrue(summary["realPaperRun"]["evidenceConsistencyPassed"])
+        self.assertTrue(summary["realPaperRun"]["growthIterationPassed"])
         self.assertEqual(summary["realPaperRun"]["fineTuningRecommendation"], "no")
-        self.assertEqual(summary["modelTraces"]["total"], 5)
+        self.assertEqual(summary["modelTraces"]["total"], 6)
         self.assertEqual(summary["modelTraces"]["fallbackCount"], 0)
         self.assertEqual(summary["modelTraces"]["byTask"]["grounded_qa"], 1)
         self.assertEqual(summary["modelTraces"]["byTask"]["adversarial_grounded_qa"], 1)
+        self.assertEqual(summary["modelTraces"]["byTask"]["research_growth"], 2)
         self.assertEqual(summary["memory"]["recordCount"], 3)
         self.assertEqual(summary["localDemo"]["selectedSpanId"], "P3.S9")
         self.assertEqual(summary["localDemo"]["evidenceWindow"], "P3.S6-P3.S12")
@@ -80,6 +82,20 @@ class ValidationReportTests(unittest.TestCase):
         self.assertFalse(summary["ok"])
         self.assertFalse(summary["localDemo"]["quoteIdsWithinWindow"])
         self.assertEqual(summary["localDemo"]["unknownEvidenceIds"], ["S3"])
+
+    def test_split_growth_iteration_evidence_marks_validation_not_ok(self):
+        summary_path = self.run_dir / "summary.json"
+        body = json.loads(summary_path.read_text(encoding="utf-8"))
+        body["runs"][0]["model_outputs"]["growth_iteration"]["data"]["ideas"] = [
+            {"source_evidence": ["growth_idea:test"]},
+            {"source_evidence": ["paper:selected-middle", "run:r1"]},
+        ]
+        summary_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["realPaperRun"]["growthIterationPassed"])
 
     def test_stale_summary_without_source_evidence_is_not_green(self):
         stale_dir = self.day / "hf_three_papers_stale"
@@ -127,7 +143,7 @@ class ValidationReportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["modelTraces"]["modelCount"], 5)
+        self.assertEqual(body["modelTraces"]["modelCount"], 6)
         self.assertEqual(body["localDemo"]["translationStatus"], "ready")
 
     def _write_validation_tree(self):
@@ -157,6 +173,7 @@ class ValidationReportTests(unittest.TestCase):
             {"task": "grounded_qa", "status": "model", "provider": "hf", "model": "test-small", "error": None},
             {"task": "adversarial_grounded_qa", "status": "model", "provider": "hf", "model": "test-small", "error": None},
             {"task": "experiment_spec", "status": "model", "provider": "hf", "model": "test-small", "error": None},
+            {"task": "research_growth", "status": "model", "provider": "hf", "model": "test-small", "error": None},
             {"task": "research_growth", "status": "model", "provider": "hf", "model": "test-small", "error": None},
         ]
         self._write_jsonl(self.day / "hf_three_papers_rerun_traces.jsonl", trace_records)
@@ -241,6 +258,7 @@ class ValidationReportTests(unittest.TestCase):
                 {"name": "pdf_parse_and_reader_spans", "passed": True, "reasons": []},
                 {"name": "grounded_qa", "passed": True, "reasons": []},
                 {"name": "adversarial_lost_in_the_middle", "passed": True, "reasons": []},
+                {"name": "research_growth_iteration", "passed": True, "reasons": []},
             ],
             "model_outputs": {
                 "qa": [
@@ -258,7 +276,20 @@ class ValidationReportTests(unittest.TestCase):
                             }
                         },
                     }
-                ]
+                ],
+                "growth_iteration": {
+                    "data": {
+                        "ideas": [
+                            {
+                                "source_evidence": [
+                                    "paper:selected-middle",
+                                    "run:r1",
+                                    "growth_idea:test",
+                                ]
+                            }
+                        ]
+                    }
+                },
             },
         }
 

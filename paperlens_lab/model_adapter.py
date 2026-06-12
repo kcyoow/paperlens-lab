@@ -223,20 +223,29 @@ class ModelGateway:
 
         def fallback() -> tuple[str, dict[str, Any]]:
             memories = paper_memory or [{"id": "paper:s1", "summary": selected_span[:220]}]
-            first_memory = memories[0]
-            evidence_id = str(first_memory.get("id", "paper:s1"))
+            paper_memory_id = str(
+                next((memory.get("id") for memory in memories if str(memory.get("id", "")).startswith("paper:")), "")
+                or memories[0].get("id", "paper:s1")
+            )
+            prior_growth_id = str(
+                next((memory.get("id") for memory in memories if str(memory.get("id", "")).startswith("growth_idea:")), "")
+                or ""
+            )
+            evidence_ids = [paper_memory_id, "run:r1"]
+            if prior_growth_id:
+                evidence_ids.insert(1, prior_growth_id)
             data = {
                 "ideas": [
                     {
                         "idea": "Turn the selected claim into a smaller ablation that changes only one variable.",
-                        "source_evidence": [evidence_id, "run:r1"],
+                        "source_evidence": evidence_ids,
                         "novelty_angle": "Use the mini-lab failure/success pattern as a lens for a narrower next test.",
                         "testable_next_step": "Run the same toy dataset with one component removed and compare the failure tags.",
                         "risk": "The toy result may be too small to generalize beyond the learning exercise.",
                     },
                     {
                         "idea": "Compare whether the paper-inspired component helps more on hard examples than easy examples.",
-                        "source_evidence": [evidence_id, "run:r1"],
+                        "source_evidence": evidence_ids,
                         "novelty_angle": "This checks when the idea matters instead of only whether it helps on average.",
                         "testable_next_step": "Split 10 examples into easy/hard buckets and report metric deltas separately.",
                         "risk": "Manual difficulty labels can bias the interpretation.",

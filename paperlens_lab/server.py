@@ -17,6 +17,7 @@ from .analysis import experiment_card, split_sentences, top_sentences
 from .ingest import PaperSource, build_source, clean_text
 from .memory_store import append_memory, load_memories, paper_key
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
+from .scenario_eval import source_contains_quote
 from .source_index import (
     evidence_window,
     get_cached_translation,
@@ -37,10 +38,10 @@ FRONTEND_OUT_DIR = FRONTEND_DIR / "out"
 class PaperInput(BaseModel):
     arxiv_or_url: str = ""
     pasted_text: str = ""
-    max_pdf_pages: int = Field(default=10, ge=1, le=32)
+    max_pdf_pages: int = Field(default=64, ge=1, le=96)
     use_model: bool = False
     max_translate_spans: int = Field(default=24, ge=1, le=96)
-    max_reader_spans: int = Field(default=180, ge=12, le=320)
+    max_reader_spans: int = Field(default=800, ge=12, le=1200)
 
 
 class AskInput(BaseModel):
@@ -175,7 +176,7 @@ def _register_api(app: FastAPI) -> None:
         arxiv_or_url: str = Form(""),
         use_model: bool = Form(False),
         max_translate_spans: int = Form(24),
-        max_reader_spans: int = Form(180),
+        max_reader_spans: int = Form(800),
     ) -> dict[str, Any]:
         if not pdf.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Upload a PDF file.")
@@ -189,7 +190,7 @@ def _register_api(app: FastAPI) -> None:
                     uploaded_pdf=handle.name,
                     arxiv_or_url=arxiv_or_url,
                     pasted_text="",
-                    max_pdf_pages=max(1, min(max_pdf_pages, 32)),
+                    max_pdf_pages=max(1, min(max_pdf_pages, 96)),
                 )
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -197,7 +198,7 @@ def _register_api(app: FastAPI) -> None:
             source,
             use_model=_should_use_model(use_model),
             max_translate_spans=max(1, min(max_translate_spans, 96)),
-            max_reader_spans=max(12, min(max_reader_spans, 320)),
+            max_reader_spans=max(12, min(max_reader_spans, 1200)),
         )
 
     @app.post("/api/translate")
@@ -493,7 +494,7 @@ def paper_document_from_source(
     if not sentences:
         sentences = [source.text]
     total_sentences = len(sentences)
-    reader_limit = max(12, min(max_reader_spans, 320))
+    reader_limit = max(12, min(max_reader_spans, 1200))
     sentences = sentences[:reader_limit]
 
     section_count = min(10, max(1, (len(sentences) + 17) // 18))
@@ -642,7 +643,7 @@ def _validated_answer_data(
         if allowed_source_ids is not None and source_id not in allowed_source_ids:
             return _insufficient_answer(payload), f"answer source id is outside the selected evidence window: {source_id}"
         quote = clean_text(str(item.get("quote", "")))
-        if quote and quote not in source_pool:
+        if quote and not source_contains_quote(source_pool, quote):
             return _insufficient_answer(payload), f"answer quote is not present in source evidence: {item.get('source_id', '')}"
     return data, None
 

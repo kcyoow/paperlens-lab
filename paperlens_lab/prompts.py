@@ -175,6 +175,7 @@ Paper memories:
 
 Rules:
 - Each idea must include at least one paper memory id and `run:r1` in source_evidence.
+- If a previous `growth_idea:*` memory is present, at least one idea must cite that `growth_idea:*` id together with `run:r1` and a paper memory id. Use the previous idea as a stepping stone, not as a final answer.
 - Do not call fine-tuning recommended just because an idea is promising; use recommended only for repeated observed model-output failures.
 - Keep each next step low-cost and directly testable.
 """

@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .scenario_eval import source_contains_quote
+
 
 DEFAULT_VALIDATION_ROOT = Path("outputs") / "service_demo_validation"
 
@@ -41,6 +43,7 @@ def build_validation_summary(root: Path | None = None) -> dict[str, Any]:
         and real_paper_run.get("evaluationPassed") == real_paper_run.get("evaluationTotal")
         and real_paper_run.get("evidenceConsistencyPassed")
         and _adversarial_litm_passed(real_paper_run)
+        and real_paper_run.get("growthIterationPassed")
         and trace_summary
         and trace_summary.get("total", 0) > 0
         and trace_summary.get("modelCount") == trace_summary.get("total")
@@ -89,6 +92,14 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
         source = run.get("source", {}) if isinstance(run, dict) else {}
         reader = run.get("reader", {}) if isinstance(run, dict) else {}
         memory = run.get("memory", {}) if isinstance(run, dict) else {}
+        growth_iteration = (((run.get("model_outputs") or {}).get("growth_iteration") or {}).get("data") or {})
+        growth_iteration_evidence = _growth_iteration_evidence(growth_iteration)
+        growth_iteration_idea_evidence = _growth_iteration_idea_evidence(growth_iteration)
+        growth_iteration_eval_passed = any(
+            item.get("name") == "research_growth_iteration" and item.get("passed")
+            for item in evaluations
+            if isinstance(item, dict)
+        )
         passed_here = sum(1 for item in evaluations if item.get("passed"))
         evaluation_total += len(evaluations)
         evaluation_passed += passed_here
@@ -118,6 +129,10 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
                     for item in evaluations
                 ],
                 "memoryRecordsAfterGrowth": memory.get("records_after_growth", 0),
+                "memoryRecordsBeforeGrowthIteration": memory.get("records_before_growth_iteration", 0),
+                "growthIterationPassed": growth_iteration_eval_passed,
+                "growthIterationEvidence": growth_iteration_evidence,
+                "growthIterationIdeaEvidence": growth_iteration_idea_evidence,
             }
         )
 
@@ -132,11 +147,59 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
         "evaluationTotal": evaluation_total,
         "evidenceConsistencyPassed": not evidence_issues,
         "evidenceConsistencyIssues": evidence_issues[:12],
+        "growthIterationPassed": _growth_iteration_passed_for_papers(papers),
         "fineTuningRecommendation": fine_tuning.get("recommendation", "unknown"),
         "fineTuningReason": fine_tuning.get("reason", ""),
         "repeatedFailures": fine_tuning.get("repeated_failures", []),
         "papers": papers,
     }
+
+
+def _growth_iteration_evidence(data: dict[str, Any]) -> list[str]:
+    evidence_ids: list[str] = []
+    for idea_evidence in _growth_iteration_idea_evidence(data):
+        for value in idea_evidence:
+            if value and value not in evidence_ids:
+                evidence_ids.append(value)
+    return evidence_ids
+
+
+def _growth_iteration_idea_evidence(data: dict[str, Any]) -> list[list[str]]:
+    ideas = data.get("ideas", []) if isinstance(data.get("ideas"), list) else []
+    idea_evidence: list[list[str]] = []
+    for idea in ideas:
+        if not isinstance(idea, dict):
+            continue
+        evidence_ids: list[str] = []
+        for source_id in idea.get("source_evidence") or []:
+            value = str(source_id)
+            if value and value not in evidence_ids:
+                evidence_ids.append(value)
+        if evidence_ids:
+            idea_evidence.append(evidence_ids)
+    return idea_evidence
+
+
+def _growth_iteration_passed_for_papers(papers: list[dict[str, Any]]) -> bool:
+    if not papers:
+        return False
+    for paper in papers:
+        complete_idea = any(
+            _growth_iteration_evidence_set_is_complete(set(idea_evidence))
+            for idea_evidence in paper.get("growthIterationIdeaEvidence") or []
+        )
+        if not (paper.get("growthIterationPassed") and complete_idea):
+            return False
+    return True
+
+
+def _growth_iteration_evidence_set_is_complete(evidence_ids: set[str]) -> bool:
+    cites_paper = "paper:selected-middle" in evidence_ids or any(
+        source_id.startswith("paper:") for source_id in evidence_ids
+    )
+    cites_run = "run:r1" in evidence_ids
+    cites_prior_growth = any(source_id.startswith("growth_idea:") for source_id in evidence_ids)
+    return cites_paper and cites_run and cites_prior_growth
 
 
 def _adversarial_litm_passed(real_paper_run: dict[str, Any]) -> bool:
@@ -314,7 +377,7 @@ def _real_paper_evidence_issues(body: dict[str, Any]) -> list[str]:
                 if source_id and source_id not in source_evidence:
                     issues.append(f"{case_name}:{span_id} cites unknown evidence {source_id}")
                     continue
-                if quote and source_id and quote not in str(source_evidence.get(source_id, "")):
+                if quote and source_id and not source_contains_quote(str(source_evidence.get(source_id, "")), quote):
                     issues.append(f"{case_name}:{span_id} quote missing from {source_id}")
         adversarial = ((run.get("model_outputs") or {}).get("adversarial_litm") or {}) if isinstance(run, dict) else {}
         if isinstance(adversarial, dict) and adversarial:
@@ -339,7 +402,7 @@ def _real_paper_evidence_issues(body: dict[str, Any]) -> list[str]:
                 if source_id and source_id not in source_evidence:
                     issues.append(f"{case_name}:{span_id} adversarial cites unknown evidence {source_id}")
                     continue
-                if quote and source_id and quote not in str(source_evidence.get(source_id, "")):
+                if quote and source_id and not source_contains_quote(str(source_evidence.get(source_id, "")), quote):
                     issues.append(f"{case_name}:{span_id} adversarial quote missing from {source_id}")
     return issues
 
