@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from paperlens_lab.ingest import PaperSource
-from paperlens_lab.server import create_app
+from paperlens_lab.server import create_app, paper_document_from_source
 
 
 class BackendContractTests(unittest.TestCase):
@@ -79,6 +79,54 @@ class BackendContractTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["source"], "arXiv:1706.03762")
         self.assertIn("metadata", body)
+
+    def test_paper_document_translates_in_small_batches(self):
+        os.environ["PAPERLENS_TRANSLATION_BATCH_SIZE"] = "2"
+        source = PaperSource(
+            title="Batch Paper",
+            authors="A. Author",
+            source_label="manual",
+            text=(
+                "First sentence has enough content to become a reader span. "
+                "Second sentence has enough content to become a reader span. "
+                "Third sentence has enough content to become a reader span. "
+                "Fourth sentence has enough content to become a reader span. "
+                "Fifth sentence has enough content to become a reader span."
+            ),
+        )
+
+        def fake_translate(title, spans, locale, use_model):
+            return type(
+                "Result",
+                (),
+                {
+                    "data": {
+                        "translations": [
+                            {"span_id": item["span_id"], "translation": f"ko {item['span_id']}"}
+                            for item in spans
+                        ]
+                    }
+                },
+            )()
+
+        with patch("paperlens_lab.server.ModelGateway") as gateway_cls:
+            gateway_cls.return_value.translate_spans.side_effect = fake_translate
+            document = paper_document_from_source(
+                source,
+                use_model=True,
+                max_translate_spans=5,
+                max_reader_spans=12,
+            )
+
+        os.environ.pop("PAPERLENS_TRANSLATION_BATCH_SIZE", None)
+        self.assertEqual(gateway_cls.return_value.translate_spans.call_count, 3)
+        translated = [
+            span["translated"]
+            for section in document["sections"]
+            for paragraph in section["paragraphs"]
+            for span in paragraph["spans"]
+        ]
+        self.assertEqual(translated[:5], ["ko P0.S1", "ko P0.S2", "ko P0.S3", "ko P0.S4", "ko P0.S5"])
 
     def test_ask_endpoint_keeps_frontend_shape_and_adds_trace(self):
         response = self.client.post(

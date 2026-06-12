@@ -29,7 +29,7 @@ export default function ReadingPane({
 }: Props) {
   function getSpanClasses(spanId: string, side: "translated" | "original") {
     const classes: string[] = [
-      "cursor-pointer rounded-sm px-0.5 transition-all duration-150",
+      "inline cursor-pointer rounded-sm border-0 bg-transparent px-0.5 text-left align-baseline [font:inherit] transition-all duration-150",
     ];
 
     const ann = annotations.find((a) => a.spanId === spanId);
@@ -85,33 +85,45 @@ export default function ReadingPane({
                     {/* English source */}
                     <div className="space-y-1 text-[15px] leading-relaxed text-text-primary">
                       {para.spans.map((span) => (
-                        <span
+                        <button
+                          type="button"
                           key={span.id}
+                          data-span-id={span.id}
+                          data-testid={`paper-span-${span.id}`}
+                          aria-label={`Select source span ${span.id}`}
                           onClick={() => onSpanClick(span.id)}
                           className={getSpanClasses(span.id, "original")}
                         >
                           {span.original}{" "}
-                        </span>
+                        </button>
                       ))}
                     </div>
                     {/* Korean translation */}
                     <div className="space-y-1 border-l border-border pl-6 text-[14px] leading-relaxed text-text-secondary">
                       {para.spans.map((span) => (
-                        <span
+                        <button
+                          type="button"
                           key={span.id}
+                          data-span-id={span.id}
+                          data-testid={`paper-span-${span.id}`}
+                          aria-label={`Select translated span ${span.id}`}
                           onClick={() => onSpanClick(span.id)}
                           className={getSpanClasses(span.id, "translated")}
                         >
                           {span.translated}{" "}
-                        </span>
+                        </button>
                       ))}
                     </div>
                   </div>
                 ) : (
                   <p className="text-[15px] leading-relaxed text-text-primary">
                     {para.spans.map((span) => (
-                      <span
+                      <button
+                        type="button"
                         key={span.id}
+                        data-span-id={span.id}
+                        data-testid={`paper-span-${span.id}`}
+                        aria-label={`Select span ${span.id}`}
                         onClick={() => onSpanClick(span.id)}
                         className={getSpanClasses(
                           span.id,
@@ -121,7 +133,7 @@ export default function ReadingPane({
                         {viewMode === "original"
                           ? span.original
                           : span.translated}{" "}
-                      </span>
+                      </button>
                     ))}
                   </p>
                 )}

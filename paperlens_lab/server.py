@@ -484,12 +484,26 @@ def _translation_placeholder(sentence: str) -> str:
 def _translation_map(title: str, spans: list[dict[str, str]], use_model: bool) -> dict[str, str]:
     if not spans:
         return {}
-    result = ModelGateway().translate_spans(title, spans, locale="ko", use_model=use_model)
-    return {
-        item.get("span_id", ""): item.get("translation", "")
-        for item in result.data.get("translations", [])
-        if item.get("span_id")
-    }
+    translations: dict[str, str] = {}
+    gateway = ModelGateway()
+    batch_size = _translation_batch_size()
+    for index in range(0, len(spans), batch_size):
+        batch = spans[index : index + batch_size]
+        result = gateway.translate_spans(title, batch, locale="ko", use_model=use_model)
+        for item in result.data.get("translations", []):
+            span_id = item.get("span_id", "")
+            if span_id:
+                translations[span_id] = item.get("translation", "")
+    return translations
+
+
+def _translation_batch_size() -> int:
+    raw = os.getenv("PAPERLENS_TRANSLATION_BATCH_SIZE", "4")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 4
+    return max(1, min(value, 12))
 
 
 def _span_id(section_index: int, span_index: int) -> str:
