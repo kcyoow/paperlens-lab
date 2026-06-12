@@ -17,13 +17,14 @@ from .analysis import experiment_card, split_sentences, starter_code_from_spec, 
 from .ingest import PaperSource, build_source, clean_text
 from .memory_store import append_memory, load_memories, paper_key
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
-from .scenario_eval import source_contains_quote
+from .scenario_eval import run_starter_code, source_contains_quote
 from .source_index import (
     evidence_window,
     get_cached_translation,
     get_span_text,
     save_cached_translation,
     save_source_index,
+    text_hash,
 )
 from .tracing import trace_content_enabled
 from .ui import EXAMPLE_TEXT, build_demo
@@ -91,6 +92,10 @@ class GrowthInput(BaseModel):
     locale: str = "ko"
     use_model: bool = False
     persist_memory: bool = True
+
+
+class StarterRunInput(BaseModel):
+    code: str
 
 
 def create_app() -> FastAPI:
@@ -222,9 +227,14 @@ def _register_api(app: FastAPI) -> None:
 
     @app.post("/api/translate-span")
     def translate_span(payload: TranslateSpanInput) -> dict[str, Any]:
-        source_text = clean_text(payload.source_text or get_span_text(payload.paper_id, payload.span_id))
+        indexed_text = get_span_text(payload.paper_id, payload.span_id) if payload.paper_id else ""
+        if payload.paper_id and not indexed_text:
+            raise HTTPException(status_code=404, detail="Selected span was not found in the paper index.")
+        source_text = clean_text(indexed_text or payload.source_text)
         if not source_text:
             raise HTTPException(status_code=404, detail="Selected span was not found in the paper index.")
+        source_hash = text_hash(source_text)
+        source_index_bound = bool(indexed_text)
         gateway = ModelGateway()
         cached = get_cached_translation(
             payload.paper_id,
@@ -241,6 +251,8 @@ def _register_api(app: FastAPI) -> None:
                 "model": gateway.model_id,
                 "provider": gateway.provider,
                 "usedFallback": False,
+                "sourceHash": source_hash,
+                "sourceIndexBound": source_index_bound,
             }
         result = gateway.translate_spans(
             payload.paper_title,
@@ -270,6 +282,8 @@ def _register_api(app: FastAPI) -> None:
             "traceId": result.trace_id,
             "error": result.error,
             "usedFallback": result.used_fallback,
+            "sourceHash": source_hash,
+            "sourceIndexBound": source_index_bound,
         }
 
     @app.post("/api/ask")
@@ -357,6 +371,15 @@ def _register_api(app: FastAPI) -> None:
             "traceId": result.trace_id,
             "error": result.error,
             "usedFallback": result.used_fallback,
+        }
+
+    @app.post("/api/starter/run")
+    def run_starter(payload: StarterRunInput) -> dict[str, Any]:
+        result = run_starter_code(payload.code)
+        return {
+            "passed": bool(result.get("passed")),
+            "reasons": result.get("reasons", []),
+            "rows": result.get("rows", []),
         }
 
     @app.post("/api/growth")

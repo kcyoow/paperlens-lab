@@ -27,7 +27,7 @@ The active Hugging Face Space stays on the Gradio SDK for Build Small Hackathon 
 - Main runtime: `app.py`.
 - Product frontend: `frontend/`, exported to `frontend/out`.
 - Gradio fallback/demo: `/gradio`.
-- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, experiment cards, and Research Growth memory loops are wired through Python; full-document batch translation and actual notebook/code execution remain staged Lab Mode extensions.
+- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, experiment cards, Research Growth memory loops, and dependency-free starter smoke execution are wired through Python; full-document batch translation and full notebook execution remain staged Lab Mode extensions.
 
 ## Current Preview Flow
 
@@ -45,6 +45,7 @@ The Python backend keeps the original hooks for source-grounded analysis and exp
 - `POST /api/paper/upload` for PDF extraction.
 - `POST /api/ask` for selected-span grounded answers.
 - `POST /api/experiment` for paper-to-experiment cards and starter code.
+- `POST /api/starter/run` for executing generated dependency-free starter smoke tests.
 
 The reader-first flow remains in React: original text, Korean translation draft, side-by-side checking, marks, source inspection, AI question affordance, and Lab Mode affordance.
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .scenario_eval import evaluate_experiment_spec, evaluate_starter_code, source_contains_quote
+from .source_index import text_hash
 
 
 DEFAULT_VALIDATION_ROOT = Path("outputs") / "service_demo_validation"
@@ -68,6 +69,7 @@ def build_validation_summary(root: Path | None = None) -> dict[str, Any]:
         and local_demo
         and local_demo.get("sourceIndexConsistent", True)
         and local_demo.get("quotesInSourceIndex")
+        and local_demo.get("translationSourceConsistent")
         and not local_demo.get("usedFallback")
         and not local_demo.get("translationUsedFallback")
     )
@@ -386,6 +388,17 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         source_id for source_id in set(evidence_ids) if allowed_evidence_ids and source_id not in allowed_evidence_ids
     )
     source_text_by_span_id = _source_index_text_by_span_id(source_index, allowed_evidence_ids)
+    selected_span_id = str(evidence_window.get("spanId", ""))
+    selected_source_text = source_text_by_span_id.get(selected_span_id, "")
+    expected_translation_source_hash = text_hash(selected_source_text) if selected_source_text else ""
+    translation_source_hash = str(translate.get("sourceHash", "")) if isinstance(translate, dict) else ""
+    translation_source_index_bound = bool(translate.get("sourceIndexBound")) if isinstance(translate, dict) else False
+    translation_source_consistent = bool(
+        translation_source_index_bound
+        and translation_source_hash
+        and expected_translation_source_hash
+        and translation_source_hash == expected_translation_source_hash
+    )
     bad_quote_ids = sorted(
         {
             str(item.get("source_id", ""))
@@ -433,6 +446,11 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         warnings.append(
             "local selected-span answer quote is not verifiable in the source-index window; rerun local browser/API proof"
         )
+    if translate and not translation_source_consistent:
+        source_index_consistent = False
+        warnings.append(
+            "local selected-span translation source hash is not bound to the source index; rerun local translation proof"
+        )
     quotes_in_source_index = bool(evidence) and not unknown_evidence_ids and not bad_quote_ids and not missing_quote_text_ids
     return {
         "askPath": str(ask_paths[0]),
@@ -463,6 +481,10 @@ def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | Non
         "translationStatus": translate.get("status", "") if isinstance(translate, dict) else "",
         "translationTraceId": translate.get("traceId", "") if isinstance(translate, dict) else "",
         "translationUsedFallback": bool(translate.get("usedFallback")) if isinstance(translate, dict) else False,
+        "translationSourceHash": translation_source_hash,
+        "translationExpectedSourceHash": expected_translation_source_hash,
+        "translationSourceIndexBound": translation_source_index_bound,
+        "translationSourceConsistent": translation_source_consistent,
     }
 
 

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from paperlens_lab.ingest import PaperSource
 from paperlens_lab.scenario_eval import evaluate_starter_code
 from paperlens_lab.server import create_app, paper_document_from_source
-from paperlens_lab.source_index import load_source_index
+from paperlens_lab.source_index import load_source_index, text_hash
 
 
 class BackendContractTests(unittest.TestCase):
@@ -252,6 +252,7 @@ class BackendContractTests(unittest.TestCase):
                     "paper_id": paper_id,
                     "paper_title": document["title"],
                     "span_id": selected["id"],
+                    "source_text": "CLIENT TEXT SHOULD NOT BE TRANSLATED",
                     "locale": "ko",
                     "use_model": True,
                 },
@@ -270,8 +271,30 @@ class BackendContractTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(first.json()["translation"], "세 번째 문장은 번역 캐시 검증을 위해 선택된다.")
+        self.assertEqual(first.json()["sourceHash"], text_hash(selected["original"]))
+        self.assertTrue(first.json()["sourceIndexBound"])
         self.assertEqual(second.json()["status"], "cached")
+        self.assertEqual(second.json()["sourceHash"], text_hash(selected["original"]))
         self.assertEqual(gateway.translate_spans.call_count, 1)
+        translated_payload = gateway.translate_spans.call_args.args[1][0]
+        self.assertEqual(translated_payload["text"], selected["original"])
+        self.assertNotIn("CLIENT TEXT SHOULD NOT BE TRANSLATED", translated_payload["text"])
+
+    def test_translate_span_rejects_index_miss_even_with_client_text(self):
+        response = self.client.post(
+            "/api/translate-span",
+            json={
+                "paper_id": "missing-paper",
+                "paper_title": "Missing",
+                "span_id": "P9.S9",
+                "source_text": "Client text should not be accepted for an indexed request.",
+                "locale": "ko",
+                "use_model": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("Selected span was not found", response.json()["detail"])
 
     def test_paper_document_translates_in_small_batches(self):
         os.environ["PAPERLENS_TRANSLATION_BATCH_SIZE"] = "2"
@@ -414,6 +437,96 @@ class BackendContractTests(unittest.TestCase):
         growth_body = growth.json()
         self.assertGreaterEqual(len(growth_body["ideas"]), 1)
         self.assertIn("fineTuningSignal", growth_body)
+
+    def test_starter_run_endpoint_executes_smoke_rows(self):
+        code = """
+def baseline(example):
+    return example["input"]
+
+def paper_inspired(example):
+    return example["input"] + " paper"
+
+def score(output, expected):
+    return 1.0 if expected in output else 0.0
+
+def run():
+    example = {"input": "mini lab", "expected": "paper"}
+    base = baseline(example)
+    proto = paper_inspired(example)
+    return [{
+        "baseline_score": score(base, example["expected"]),
+        "prototype_score": score(proto, example["expected"]),
+        "metric": "toy score",
+        "failure_condition": "prototype_score <= baseline_score",
+    }]
+"""
+        response = self.client.post("/api/starter/run", json={"code": code})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["passed"])
+        self.assertEqual(body["reasons"], [])
+        self.assertEqual(body["rows"][0]["prototype_score"], 1.0)
+
+    def test_starter_run_endpoint_reports_syntax_error(self):
+        response = self.client.post("/api/starter/run", json={"code": "def run(:\n"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["passed"])
+        self.assertIn("syntax error", body["reasons"][0])
+
+    def test_starter_run_endpoint_rejects_unsafe_code(self):
+        code = """
+import os
+
+def baseline(example):
+    return example
+
+def paper_inspired(example):
+    return example
+
+def score(output, expected):
+    return 0.0
+
+def run():
+    open("/tmp/paperlens-unsafe-smoke", "w").write("nope")
+    return [{
+        "baseline_score": 0.0,
+        "prototype_score": 0.0,
+        "metric": "toy",
+        "failure_condition": "unsafe code ran",
+    }]
+"""
+        response = self.client.post("/api/starter/run", json={"code": code})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["passed"])
+        self.assertIn("starter code may only import json", body["reasons"])
+        self.assertIn("starter code uses unsafe name open", body["reasons"])
+
+    def test_starter_run_endpoint_times_out_infinite_loop(self):
+        code = """
+def baseline(example):
+    return example
+
+def paper_inspired(example):
+    return example
+
+def score(output, expected):
+    return 0.0
+
+def run():
+    while True:
+        pass
+"""
+        response = self.client.post("/api/starter/run", json={"code": code})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["passed"])
+        self.assertIn("starter subprocess timed out", body["reasons"])
 
 
 if __name__ == "__main__":

@@ -76,6 +76,11 @@ interface LabText {
   todos: string;
   smokeTestIncluded: string;
   copy: string;
+  copied: string;
+  runSmoke: string;
+  runningSmoke: string;
+  smokePassed: string;
+  smokeFailed: string;
   reviewWarning: string;
   close: string;
   download: string;
@@ -194,6 +199,11 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       todos: "runnable",
       smokeTestIncluded: "smoke test included",
       copy: "Copy",
+      copied: "Copied",
+      runSmoke: "Run smoke",
+      runningSmoke: "Running...",
+      smokePassed: "Smoke passed",
+      smokeFailed: "Smoke failed",
       reviewWarning:
         "Review generated code before expanding it beyond the built-in smoke test.",
       close: "Close",
@@ -298,6 +308,11 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       todos: "실행 가능",
       smokeTestIncluded: "smoke-test 포함",
       copy: "복사",
+      copied: "복사됨",
+      runSmoke: "smoke 실행",
+      runningSmoke: "실행 중...",
+      smokePassed: "smoke 통과",
+      smokeFailed: "smoke 실패",
       reviewWarning:
         "내장 smoke test 밖으로 확장하기 전에는 생성 코드를 반드시 검토하세요.",
       close: "닫기",

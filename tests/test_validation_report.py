@@ -55,6 +55,8 @@ class ValidationReportTests(unittest.TestCase):
         self.assertTrue(summary["localDemo"]["sourceIndexConsistent"])
         self.assertTrue(summary["localDemo"]["quoteIdsWithinWindow"])
         self.assertTrue(summary["localDemo"]["quotesInSourceIndex"])
+        self.assertTrue(summary["localDemo"]["translationSourceConsistent"])
+        self.assertEqual(summary["localDemo"]["translationSourceHash"], "e6c340c1ebb19a22")
         self.assertFalse(summary["localDemo"]["usedFallback"])
 
     def test_source_index_mismatch_marks_validation_not_ok(self):
@@ -99,6 +101,18 @@ class ValidationReportTests(unittest.TestCase):
         self.assertFalse(summary["ok"])
         self.assertFalse(summary["localDemo"]["quotesInSourceIndex"])
         self.assertEqual(summary["localDemo"]["badQuoteIds"], ["P3.S9"])
+
+    def test_local_translation_hash_mismatch_marks_validation_not_ok(self):
+        translate_path = self.day / "local_after_source_index_translate_p3s9.json"
+        body = json.loads(translate_path.read_text(encoding="utf-8"))
+        body["sourceHash"] = "stale-translation-source"
+        translate_path.write_text(json.dumps(body), encoding="utf-8")
+
+        summary = build_validation_summary(self.root)
+
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["localDemo"]["translationSourceConsistent"])
+        self.assertIn("translation source hash", " ".join(summary["warnings"]))
 
     def test_split_growth_iteration_evidence_marks_validation_not_ok(self):
         summary_path = self.run_dir / "summary.json"
@@ -280,14 +294,21 @@ class ValidationReportTests(unittest.TestCase):
                         "spanId": "P3.S9",
                         "spanRange": "P3.S6-P3.S12",
                         "sourceHash": "matching-source-hash",
-                        "spans": [{"spanId": "P3.S9", "textHash": "span-hash", "position": 99}],
+                        "spans": [{"spanId": "P3.S9", "textHash": "e6c340c1ebb19a22", "position": 99}],
                     },
                 }
             ),
             encoding="utf-8",
         )
         (self.day / "local_after_source_index_translate_p3s9.json").write_text(
-            json.dumps({"status": "ready", "usedFallback": False}),
+            json.dumps(
+                {
+                    "status": "ready",
+                    "usedFallback": False,
+                    "sourceHash": "e6c340c1ebb19a22",
+                    "sourceIndexBound": True,
+                }
+            ),
             encoding="utf-8",
         )
         (self.day / "local_after_source_index_paper.json").write_text(
@@ -311,7 +332,7 @@ class ValidationReportTests(unittest.TestCase):
                         {
                             "span_id": "P3.S9",
                             "position": 99,
-                            "text_hash": "span-hash",
+                            "text_hash": "e6c340c1ebb19a22",
                             "text": "In this work we propose the Transformer",
                         },
                     ],

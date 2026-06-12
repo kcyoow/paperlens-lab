@@ -44,6 +44,12 @@ export interface GrowthResult {
   usedFallback?: boolean;
 }
 
+export interface StarterRunResult {
+  passed: boolean;
+  reasons: string[];
+  rows: Array<Record<string, unknown>>;
+}
+
 export interface ValidationSummary {
   ok: boolean;
   validationRoot?: string;
@@ -136,6 +142,8 @@ export interface SpanTranslationResult {
   spanId: string;
   translation: string;
   status: "ready" | "cached" | "fallback";
+  sourceHash?: string;
+  sourceIndexBound?: boolean;
   model?: string;
   provider?: string;
   traceId?: string;
@@ -316,6 +324,15 @@ export async function buildGrowthIdeas(params: {
     }),
   });
   return parseJson<GrowthResult>(response);
+}
+
+export async function runStarterCode(code: string): Promise<StarterRunResult> {
+  const response = await fetch(`${API_BASE}/api/starter/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  return parseJson<StarterRunResult>(response);
 }
 
 export function savePaperToSession(paper: PaperDocument) {

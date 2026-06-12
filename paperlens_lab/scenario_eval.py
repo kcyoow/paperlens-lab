@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+import base64
 from collections import Counter
+from dataclasses import dataclass
+import json
 import re
+import subprocess
+import sys
+import textwrap
 from typing import Any
 
 
@@ -197,12 +202,23 @@ def experiment_heavy_terms(text: str) -> list[str]:
 
 def evaluate_starter_code(code: str) -> EvalResult:
     reasons: list[str] = []
+    smoke = run_starter_code(code)
+    if not smoke["passed"]:
+        return EvalResult("starter_code_smoke", False, list(smoke["reasons"]))
+    return EvalResult("starter_code_smoke", True, reasons)
+
+
+def run_starter_code(code: str) -> dict[str, Any]:
+    reasons: list[str] = []
     if not code.strip():
-        return EvalResult("starter_code_smoke", False, ["missing starter code"])
+        return {"passed": False, "reasons": ["missing starter code"], "rows": []}
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
-        return EvalResult("starter_code_smoke", False, [f"starter code syntax error: {exc.msg}"])
+        return {"passed": False, "reasons": [f"starter code syntax error: {exc.msg}"], "rows": []}
+    safety_reasons = _starter_code_safety_reasons(tree)
+    if safety_reasons:
+        return {"passed": False, "reasons": safety_reasons, "rows": []}
 
     function_names = {
         node.name
@@ -213,31 +229,140 @@ def evaluate_starter_code(code: str) -> EvalResult:
         if required not in function_names:
             reasons.append(f"starter code missing {required}()")
 
-    namespace: dict[str, Any] = {"__name__": "paperlens_starter_smoke"}
-    try:
-        exec(compile(tree, "<paperlens_starter>", "exec"), namespace)
-    except Exception as exc:  # pragma: no cover - defensive smoke gate
-        reasons.append(f"starter code failed during import: {type(exc).__name__}: {exc}")
-        return EvalResult("starter_code_smoke", not reasons, reasons)
+    smoke = _run_starter_code_subprocess(code)
+    reasons.extend(smoke["reasons"])
+    rows = smoke["rows"]
+    if not isinstance(rows, list) or not rows:
+        reasons.append("starter run() did not return non-empty rows")
+    else:
+        for idx, row in enumerate(rows[:3], start=1):
+            if not isinstance(row, dict):
+                reasons.append(f"starter row {idx} is not a dict")
+                continue
+            for key in ("baseline_score", "prototype_score", "metric", "failure_condition"):
+                if key not in row:
+                    reasons.append(f"starter row {idx} missing {key}")
+    return {"passed": not reasons, "reasons": reasons, "rows": rows if isinstance(rows, list) else []}
 
-    run = namespace.get("run")
-    if callable(run):
+
+def _run_starter_code_subprocess(code: str, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+    encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    runner = textwrap.dedent(
+        """
+        import ast
+        import base64
+        import json
+        import sys
+
         try:
-            rows = run()
-        except Exception as exc:  # pragma: no cover - defensive smoke gate
-            reasons.append(f"starter run() failed: {type(exc).__name__}: {exc}")
-            rows = []
-        if not isinstance(rows, list) or not rows:
-            reasons.append("starter run() did not return non-empty rows")
-        else:
-            for idx, row in enumerate(rows[:3], start=1):
-                if not isinstance(row, dict):
-                    reasons.append(f"starter row {idx} is not a dict")
-                    continue
-                for key in ("baseline_score", "prototype_score", "metric", "failure_condition"):
-                    if key not in row:
-                        reasons.append(f"starter row {idx} missing {key}")
-    return EvalResult("starter_code_smoke", not reasons, reasons)
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
+            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+        except Exception:
+            pass
+
+        def safe_import(name, globals_=None, locals_=None, fromlist=(), level=0):
+            if name == "json" and level == 0:
+                return json
+            raise ImportError(f"starter code may only import json, not {name}")
+
+        safe_builtins = {
+            "__import__": safe_import,
+            "abs": abs,
+            "bool": bool,
+            "dict": dict,
+            "enumerate": enumerate,
+            "float": float,
+            "int": int,
+            "len": len,
+            "list": list,
+            "max": max,
+            "min": min,
+            "range": range,
+            "round": round,
+            "set": set,
+            "sorted": sorted,
+            "str": str,
+            "sum": sum,
+            "tuple": tuple,
+        }
+
+        code = base64.b64decode(sys.argv[1]).decode("utf-8")
+        namespace = {"__name__": "paperlens_starter_smoke", "__builtins__": safe_builtins}
+        result = {"passed": False, "reasons": [], "rows": []}
+        try:
+            tree = ast.parse(code)
+            exec(compile(tree, "<paperlens_starter>", "exec"), namespace)
+            run = namespace.get("run")
+            if not callable(run):
+                result["reasons"].append("starter code missing runnable run()")
+            else:
+                rows = run()
+                result["rows"] = rows if isinstance(rows, list) else []
+                result["passed"] = isinstance(rows, list)
+        except Exception as exc:
+            result["reasons"].append(f"starter subprocess failed: {type(exc).__name__}: {exc}")
+        print(json.dumps(result, ensure_ascii=False))
+        """
+    ).strip()
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", runner, encoded],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return {"passed": False, "reasons": ["starter subprocess timed out"], "rows": []}
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        return {
+            "passed": False,
+            "reasons": [f"starter subprocess exited with {completed.returncode}: {detail[-1] if detail else 'no output'}"],
+            "rows": [],
+        }
+    try:
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {"passed": False, "reasons": ["starter subprocess returned invalid JSON"], "rows": []}
+    return {
+        "passed": bool(result.get("passed")),
+        "reasons": list(result.get("reasons") or []),
+        "rows": result.get("rows") if isinstance(result.get("rows"), list) else [],
+    }
+
+
+def _starter_code_safety_reasons(tree: ast.AST) -> list[str]:
+    reasons: list[str] = []
+    forbidden_names = {
+        "__import__",
+        "breakpoint",
+        "compile",
+        "delattr",
+        "eval",
+        "exec",
+        "getattr",
+        "globals",
+        "input",
+        "locals",
+        "open",
+        "setattr",
+        "vars",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [alias.name.split(".")[0] for alias in node.names]
+            if any(name != "json" for name in names):
+                reasons.append("starter code may only import json")
+        elif isinstance(node, ast.Name) and (
+            node.id in forbidden_names or (node.id.startswith("__") and node.id != "__name__")
+        ):
+            reasons.append(f"starter code uses unsafe name {node.id}")
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            reasons.append(f"starter code uses unsafe attribute {node.attr}")
+    return sorted(set(reasons))
 
 
 def evaluate_growth_ideas(
