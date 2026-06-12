@@ -328,9 +328,14 @@ function ValidationEvidencePanel({
   const fineTuning = realPaperRun?.fineTuningRecommendation ?? "unknown";
   const papers = realPaperRun?.papers?.map((paper) => paper.arxiv || paper.name).filter(Boolean) ?? [];
   const firstPaper = realPaperRun?.papers?.[0];
+  const litm = firstPaper?.adversarialLitm;
   const scope = firstPaper
     ? `${firstPaper.pageMarkers} parsed pages · ${firstPaper.readerSpans}/${firstPaper.totalSentenceCount || firstPaper.readerSpans} reader spans`
     : "no scope";
+  const litmRatio =
+    typeof litm?.target_char_offset_ratio === "number"
+      ? `${Math.round(litm.target_char_offset_ratio * 100)}%`
+      : "n/a";
   const evidenceOk =
     realPaperRun?.evidenceConsistencyPassed !== false && localDemo?.quoteIdsWithinWindow !== false;
 
@@ -376,7 +381,7 @@ function ValidationEvidencePanel({
         />
       </div>
 
-      <div className="mt-4 grid gap-2 text-[11px] text-text-muted sm:grid-cols-3">
+      <div className="mt-4 grid gap-2 text-[11px] text-text-muted sm:grid-cols-4">
         <p>
           <span className="font-semibold text-text-primary">
             {locale === "ko" ? "논문" : "Papers"}:
@@ -394,6 +399,12 @@ function ValidationEvidencePanel({
             {locale === "ko" ? "근거 ID" : "Evidence IDs"}:
           </span>{" "}
           {evidenceOk ? "verified" : "rerun needed"}
+        </p>
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "긴 문맥" : "Long context"}:
+          </span>{" "}
+          {litm?.target_span_id || "n/a"} · {litm?.context_chars ?? 0} chars · {litmRatio} offset
         </p>
       </div>
 

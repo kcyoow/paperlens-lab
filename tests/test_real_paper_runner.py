@@ -109,14 +109,27 @@ class RealPaperRunnerTests(unittest.TestCase):
                 {
                     "translations": [
                         {
-                            "span_id": span_id,
-                            "translation": f"{span_id} 번역은 F1, Table 2, 3.2를 controlled evidence conditions에서만 보존한다.",
-                            "preserved_terms": ["F1", "Table 2"],
+                            "span_id": item["span_id"],
+                            "translation": f"{item['span_id']} 번역 초안: {item['text']}",
+                            "preserved_terms": ["F1", "Table 2", "MIDSTREAM-LITM-427"],
                             "uncertain_phrases": [],
                         }
-                        for span_id in self._span_ids(prompt)
+                        for item in self._span_payloads(prompt)
                     ],
                     "notes": [],
+                }
+            )
+        if "Long evidence packet:" in prompt:
+            phrase = self._target_phrase(prompt)
+            evidence = self._long_evidence(prompt)
+            target = next((item for item in evidence if phrase and phrase in item.get("text", "")), evidence[0])
+            return json.dumps(
+                {
+                    "answer": f"{target['source_id']} contains the middle-only phrase and supports only the local claim.",
+                    "evidence": [{"source_id": target["source_id"], "quote": target["text"]}],
+                    "confidence": "medium",
+                    "needs_more_context": True,
+                    "unsupported_assumptions": ["full-paper superiority and fine-tuning need require more context"],
                 }
             )
         if '"confidence"' in prompt:
@@ -170,15 +183,42 @@ class RealPaperRunnerTests(unittest.TestCase):
             lines.append(f"[page {page}]")
             for idx in range(1, 31):
                 global_idx = (page - 1) * 30 + idx
-                lines.append(
-                    "This controlled evidence sentence reports that the method preserves F1 in Table 2 and improves 3.2 points only under controlled evidence conditions."
-                )
+                if global_idx == 47:
+                    lines.append(
+                        "The MIDSTREAM-LITM-427 ablation reports that F1 improves by 3.2 points in Table 2 only under controlled evidence conditions and does not establish full-paper superiority."
+                    )
+                else:
+                    lines.append(
+                        f"This controlled distractor sentence {global_idx} discusses baselines, metrics, and evidence conditions without the unique middle anchor."
+                    )
         return "\n".join(lines)
 
     def _span_ids(self, prompt):
         import re
 
         return re.findall(r'"span_id":\s*"(P\d+\.S\d+)"', prompt)
+
+    def _span_payloads(self, prompt):
+        import json
+        import re
+
+        match = re.search(r"Source spans:\n(.*?)\n$", prompt, re.DOTALL)
+        if not match:
+            return [{"span_id": span_id, "text": ""} for span_id in self._span_ids(prompt)]
+        return json.loads(match.group(1))
+
+    def _target_phrase(self, prompt):
+        import re
+
+        match = re.search(r"Exact phrase to locate:\s*(.*?)\nLong evidence packet:", prompt, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    def _long_evidence(self, prompt):
+        import json
+        import re
+
+        match = re.search(r"Long evidence packet:\n(.*?)\n\nThe packet intentionally", prompt, re.DOTALL)
+        return json.loads(match.group(1)) if match else []
 
     def _selected_span_id(self, prompt):
         import re

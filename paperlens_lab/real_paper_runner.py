@@ -117,6 +117,15 @@ def run_real_paper_case(
             }
         )
 
+    litm_probe = _run_adversarial_litm_probe(
+        case=case,
+        document_title=document["title"],
+        spans=spans,
+        gateway=gateway,
+        use_model=use_model,
+        locale=locale,
+    )
+
     experiment = gateway.experiment_spec(
         paper_title=document["title"],
         selected_span=selected[len(selected) // 2]["original"] if selected else "",
@@ -160,10 +169,10 @@ def run_real_paper_case(
 
     evals = [
         evaluate_pdf_parse(source, document, spans),
-        *_evaluate_run(selected, translations.data, qa_runs, experiment.data, growth.data, memories),
+        *_evaluate_run(selected, translations.data, qa_runs, experiment.data, growth.data, memories, litm_probe),
     ]
     if use_model:
-        evals.append(evaluate_model_backing(translations, qa_runs, experiment, growth))
+        evals.append(evaluate_model_backing(translations, qa_runs, experiment, growth, litm_probe))
     failures = _failure_records(case.name, evals, qa_runs, experiment, growth)
     result = {
         "case": asdict(case),
@@ -190,12 +199,14 @@ def run_real_paper_case(
                 }
                 for item in selected
             ],
+            "adversarial_litm": litm_probe.get("stats", {}),
         },
         "evaluations": [asdict(item) for item in evals],
         "fine_tuning": fine_tuning_gate(failures) if use_model else _no_model_fine_tuning_decision(),
         "model_outputs": {
             "translation": _public_result(translations),
             "qa": qa_runs,
+            "adversarial_litm": litm_probe,
             "experiment": _public_result(experiment),
             "growth": _public_result(growth),
         },
@@ -274,6 +285,218 @@ def _flatten_reader_spans(document: dict[str, Any]) -> list[dict[str, Any]]:
     return spans
 
 
+def _run_adversarial_litm_probe(
+    *,
+    case: RealPaperCase,
+    document_title: str,
+    spans: list[dict[str, Any]],
+    gateway: ModelGateway,
+    use_model: bool,
+    locale: str,
+) -> dict[str, Any]:
+    selected = _selected_spans(spans)
+    target = next((item for item in selected if item.get("position_label") == "middle"), selected[0] if selected else {})
+    target_phrase = _target_phrase(str(target.get("original", "")))
+    evidence, source_evidence, stats = _build_litm_context(spans, target, target_phrase)
+    question = (
+        f"긴 evidence packet 안에서 exact phrase `{target_phrase}`를 포함하는 source_id를 찾아줘. "
+        "그 문장이 무엇을 뒷받침하는지 말하고, 이것만으로 전체 논문 성능 우위나 fine-tuning 필요성이 증명되는지도 판단해줘."
+        if locale == "ko"
+        else (
+            f"Find the source_id in the long evidence packet that contains the exact phrase `{target_phrase}`. "
+            "Explain what that item supports, and whether this alone proves full-paper superiority or a fine-tuning need."
+        )
+    )
+    result = gateway.answer_evidence_probe(
+        paper_title=document_title,
+        question=question,
+        target_span_id=str(target.get("id", "")),
+        target_phrase=target_phrase,
+        evidence_items=evidence,
+        locale=locale,
+        use_model=use_model,
+    )
+    return {
+        "question": question,
+        "source_evidence": source_evidence,
+        "stats": stats,
+        "result": _public_result(result),
+    }
+
+
+def _build_litm_context(
+    spans: list[dict[str, Any]],
+    target: dict[str, Any],
+    target_phrase: str,
+    *,
+    min_chars: int = 8000,
+    max_chars: int = 14000,
+    min_spans: int = 60,
+) -> tuple[list[dict[str, str]], dict[str, str], dict[str, Any]]:
+    if not spans:
+        return [], {}, {
+            "context_span_count": 0,
+            "context_chars": 0,
+            "target_span_id": "",
+            "target_phrase": target_phrase,
+            "target_char_offset_ratio": 0,
+            "target_position_ratio": 0,
+            "foregrounded_selected_span": False,
+            "distractor_count": 0,
+            "target_phrase_non_target_count": 0,
+        }
+
+    target_position = int(target.get("position") if target.get("position") is not None else len(spans) // 2)
+    target_position = max(0, min(target_position, len(spans) - 1))
+    start = target_position
+    end = target_position + 1
+    before_chars = 0
+    after_chars = 0
+
+    def span_chars(index: int) -> int:
+        return len(str(spans[index].get("original", ""))) + 1
+
+    while True:
+        current_chars = sum(span_chars(index) for index in range(start, end))
+        current_count = end - start
+        if current_chars >= min_chars and current_count >= min_spans:
+            break
+        if current_chars >= max_chars and current_count >= min_spans:
+            break
+        can_left = start > 0
+        can_right = end < len(spans)
+        if not can_left and not can_right:
+            break
+        if (before_chars <= after_chars and can_left) or not can_right:
+            start -= 1
+            before_chars += span_chars(start)
+        else:
+            after_chars += span_chars(end)
+            end += 1
+
+    context_spans = spans[start:end]
+    evidence = []
+    merged_count = 0
+    target_span_id = str(spans[target_position].get("id", ""))
+    for index, item in enumerate(context_spans):
+        if not item.get("id") or not item.get("original"):
+            continue
+        item_id = str(item.get("id", ""))
+        text, merged = (
+            _evidence_chunk_text(context_spans, index)
+            if item_id == target_span_id
+            else (str(item.get("original", "")).strip(), False)
+        )
+        if merged:
+            merged_count += 1
+        evidence.append({"source_id": item_id, "text": text})
+    source_evidence = {item["source_id"]: item["text"] for item in evidence}
+    context_chars = sum(len(item["text"]) + 1 for item in evidence)
+    chars_before_target = 0
+    target_item_index = 0
+    for index, item in enumerate(evidence):
+        if item["source_id"] == target_span_id:
+            target_item_index = index
+            break
+        chars_before_target += len(item["text"]) + 1
+    target_text = source_evidence.get(target_span_id, "")
+    target_center = chars_before_target + (len(target_text) / 2)
+    non_target_phrase_count = sum(
+        1
+        for item in evidence
+        if item["source_id"] != target_span_id and target_phrase and target_phrase in item["text"]
+    )
+    stats = {
+        "context_span_count": len(evidence),
+        "context_chars": context_chars,
+        "target_span_id": target_span_id,
+        "target_phrase": target_phrase,
+        "target_item_index": target_item_index,
+        "target_position_ratio": target_item_index / max(len(evidence) - 1, 1),
+        "target_char_offset_ratio": target_center / max(context_chars, 1),
+        "foregrounded_selected_span": False,
+        "distractor_count": max(len(evidence) - 1, 0),
+        "target_phrase_in_target": bool(target_phrase and target_phrase in target_text),
+        "target_phrase_non_target_count": non_target_phrase_count,
+        "merged_context_items": merged_count,
+        "context_start_span_id": evidence[0]["source_id"] if evidence else "",
+        "context_end_span_id": evidence[-1]["source_id"] if evidence else "",
+    }
+    return evidence, source_evidence, stats
+
+
+def _evidence_chunk_text(context_spans: list[dict[str, Any]], index: int) -> tuple[str, bool]:
+    text = str(context_spans[index].get("original", "")).strip()
+    if not text:
+        return "", False
+    parts = [text]
+    cursor = index
+    while len(parts) < 3 and _looks_like_continued_fragment(parts[-1]) and cursor + 1 < len(context_spans):
+        next_text = str(context_spans[cursor + 1].get("original", "")).strip()
+        if not next_text or _looks_like_section_heading(next_text):
+            break
+        parts.append(next_text)
+        cursor += 1
+    return " ".join(parts), len(parts) > 1
+
+
+def _looks_like_continued_fragment(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    lower_tail = stripped.split()[-1].strip(" ,.;:").lower() if stripped.split() else ""
+    weak_endings = {"a", "an", "and", "as", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}
+    if lower_tail in weak_endings:
+        return True
+    return stripped[-1] not in {".", "?", "!", ":", ")"}
+
+
+def _looks_like_section_heading(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.lower().startswith(("figure ", "table ")):
+        return True
+    return bool(stripped[0].isdigit() and len(stripped.split()) <= 8)
+
+
+def _target_phrase(text: str, *, max_words: int = 10, min_words: int = 6) -> str:
+    cleaned = " ".join(str(text).split())
+    if not cleaned:
+        return ""
+    words = cleaned.split()
+    if len(words) <= max_words:
+        return _trim_phrase_ending(cleaned, min_words=min_words)
+    for index in range(0, max(1, len(words) - max_words + 1)):
+        candidate = " ".join(words[index : index + max_words]).strip(" ,.;:")
+        if any(char.isdigit() for char in candidate) or any(char.isupper() for char in candidate):
+            return _trim_phrase_ending(candidate, min_words=min_words)
+    return _trim_phrase_ending(" ".join(words[:max_words]).strip(" ,.;:"), min_words=min_words)
+
+
+def _trim_phrase_ending(phrase: str, *, min_words: int) -> str:
+    words = phrase.split()
+    weak_endings = {
+        "a",
+        "an",
+        "and",
+        "as",
+        "by",
+        "for",
+        "from",
+        "in",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+    }
+    while len(words) > min_words and words[-1].strip(" ,.;:").lower() in weak_endings:
+        words.pop()
+    return " ".join(words).strip(" ,.;:")
+
+
 def _selected_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(spans) <= 3:
         return [{**span, "position_label": f"span-{index + 1}"} for index, span in enumerate(spans)]
@@ -350,6 +573,7 @@ def _evaluate_run(
     experiment_data: dict[str, Any],
     growth_data: dict[str, Any],
     memories: list[dict[str, Any]],
+    litm_probe: dict[str, Any] | None = None,
 ) -> list[EvalResult]:
     evals: list[EvalResult] = []
     expected_ids = [item["id"] for item in selected]
@@ -370,7 +594,9 @@ def _evaluate_run(
                 require_needs_more_context=False,
             )
         )
-    evals.append(evaluate_lost_in_the_middle(qa_runs))
+    evals.append(evaluate_middle_selected_span_grounding(qa_runs))
+    if litm_probe:
+        evals.append(evaluate_lost_in_the_middle(litm_probe))
     evals.append(evaluate_experiment_spec(experiment_data))
     known_ids = {item.get("id", "") for item in memories}
     known_ids.update({"paper:selected-middle", "run:r1"})
@@ -396,7 +622,7 @@ def evaluate_pdf_parse(source: PaperSource, document: dict[str, Any], spans: lis
     return EvalResult("pdf_parse_and_reader_spans", not reasons, reasons)
 
 
-def evaluate_lost_in_the_middle(qa_runs: list[dict[str, Any]]) -> EvalResult:
+def evaluate_middle_selected_span_grounding(qa_runs: list[dict[str, Any]]) -> EvalResult:
     reasons: list[str] = []
     middle_runs = [run for run in qa_runs if run["span"].get("position_label") == "middle"]
     if not middle_runs and len(qa_runs) >= 3:
@@ -412,7 +638,56 @@ def evaluate_lost_in_the_middle(qa_runs: list[dict[str, Any]]) -> EvalResult:
             reasons.append(f"middle span {span_id} was not cited")
         if run["result"].get("used_fallback"):
             reasons.append("middle QA used fallback instead of model output")
-    return EvalResult("lost_in_the_middle", not reasons, reasons)
+    return EvalResult("middle_selected_span_grounding", not reasons, reasons)
+
+
+def evaluate_lost_in_the_middle(probe: dict[str, Any]) -> EvalResult:
+    reasons: list[str] = []
+    stats = probe.get("stats", {}) if isinstance(probe.get("stats"), dict) else {}
+    result = probe.get("result", {}) if isinstance(probe.get("result"), dict) else {}
+    data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+    source_evidence = probe.get("source_evidence", {}) if isinstance(probe.get("source_evidence"), dict) else {}
+    target_span_id = str(stats.get("target_span_id") or "")
+    target_phrase = str(stats.get("target_phrase") or "").strip()
+
+    if int(stats.get("context_span_count") or 0) < 60:
+        reasons.append("long-context probe used fewer than 60 ordered spans")
+    if int(stats.get("context_chars") or 0) < 8000:
+        reasons.append("long-context probe used fewer than 8000 characters")
+    ratio = float(stats.get("target_char_offset_ratio") or 0)
+    if ratio < 0.35 or ratio > 0.65:
+        reasons.append(f"target evidence was not buried near the middle of the context: {ratio:.2f}")
+    if stats.get("foregrounded_selected_span") is not False:
+        reasons.append("target span was foregrounded outside the long evidence packet")
+    if int(stats.get("distractor_count") or 0) < 40:
+        reasons.append("long-context probe did not include enough distractor spans")
+    if stats.get("target_phrase_in_target") is not True:
+        reasons.append("target phrase is not present in the target evidence item")
+    if int(stats.get("target_phrase_non_target_count") or 0) > 0:
+        reasons.append("target phrase also appears in distractor evidence")
+
+    grounded = evaluate_grounded_qa(
+        data,
+        target_span_id,
+        source_evidence=source_evidence,
+        require_needs_more_context=True,
+    )
+    reasons.extend(grounded.reasons)
+    evidence = data.get("evidence", []) if isinstance(data, dict) else []
+    cited_ids = [str(item.get("source_id", "")) for item in evidence if isinstance(item, dict)]
+    non_target_ids = sorted({source_id for source_id in cited_ids if source_id and source_id != target_span_id})
+    if non_target_ids:
+        reasons.append(f"long-context answer cited non-target distractor evidence: {', '.join(non_target_ids)}")
+    target_quotes = [
+        str(item.get("quote", ""))
+        for item in evidence
+        if isinstance(item, dict) and str(item.get("source_id", "")) == target_span_id
+    ]
+    if target_phrase and not any(target_phrase in quote for quote in target_quotes):
+        reasons.append("target evidence quote did not include the exact middle-only phrase")
+    if result.get("used_fallback"):
+        reasons.append("long-context QA used fallback instead of model output")
+    return EvalResult("adversarial_lost_in_the_middle", not reasons, reasons)
 
 
 def evaluate_model_backing(
@@ -420,6 +695,7 @@ def evaluate_model_backing(
     qa_runs: list[dict[str, Any]],
     experiment: Any,
     growth: Any,
+    litm_probe: dict[str, Any] | None = None,
 ) -> EvalResult:
     reasons: list[str] = []
     if translation.used_fallback:
@@ -431,6 +707,8 @@ def evaluate_model_backing(
         reasons.append("experiment used fallback")
     if growth.used_fallback:
         reasons.append("growth used fallback")
+    if litm_probe and (litm_probe.get("result") or {}).get("used_fallback"):
+        reasons.append("adversarial long-context QA used fallback")
     return EvalResult("model_backing", not reasons, reasons)
 
 
@@ -451,7 +729,11 @@ def _failure_records(
                     label=reason,
                     scenario_id=scenario_id,
                     model=model,
-                    severity="high" if item.name in {"grounded_qa", "lost_in_the_middle"} else "medium",
+                    severity=(
+                        "high"
+                        if item.name in {"grounded_qa", "middle_selected_span_grounding", "adversarial_lost_in_the_middle"}
+                        else "medium"
+                    ),
                     root_cause=_root_cause(reason),
                     fix_attempted=True,
                 )
@@ -474,11 +756,15 @@ def _failure_records(
 
 def _root_cause(reason: str) -> str:
     lowered = reason.lower()
+    if any(term in lowered for term in ("pdf", "page marker", "reader", "source index", "source hash", "parse")):
+        return "parser"
+    if any(term in lowered for term in ("fallback", "trace", "provider", "missing source_evidence", "unknown evidence")):
+        return "retrieval"
     if "schema" in lowered or "json" in lowered or "missing" in lowered:
         return "schema"
     if "translation" in lowered or "term" in lowered:
         return "terminology"
-    if "fallback" in lowered or "middle" in lowered or "unsupported" in lowered:
+    if "middle" in lowered or "unsupported" in lowered:
         return "model_capability"
     return "retrieval"
 

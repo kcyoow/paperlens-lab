@@ -58,6 +58,45 @@ Rules:
 """
 
 
+def evidence_probe_prompt(
+    paper_title: str,
+    question: str,
+    target_phrase: str,
+    evidence: list[dict[str, str]],
+    locale: str,
+) -> str:
+    target_phrase_json = json.dumps(target_phrase, ensure_ascii=False)
+    return f"""You are PaperLens Lab running an adversarial long-context evidence check.
+Answer using only the long evidence packet. The target evidence item is not named for you; find it by matching the exact phrase in the question.
+Use Korean when locale is ko. Cite source IDs for every substantive claim.
+
+Critical validation rules for this probe:
+- Find the single evidence item that contains the exact phrase.
+- Set the quote to exactly the exact phrase, and nothing longer, when the phrase appears in that item.
+- This probe always asks whether one evidence item proves a broader full-paper conclusion or fine-tuning need.
+- Because one evidence item cannot prove that broader conclusion here, set `needs_more_context` to true and `confidence` to "medium".
+- Put the unsupported broader conclusion in `unsupported_assumptions`.
+
+Return only valid JSON:
+{{
+  "answer": "...",
+  "evidence": [{{"source_id": "P0.S1", "quote": {target_phrase_json}}}],
+  "confidence": "medium",
+  "needs_more_context": true,
+  "unsupported_assumptions": ["full-paper superiority or fine-tuning need is not proven by one evidence item"]
+}}
+
+Paper: {paper_title}
+Locale: {locale}
+Question: {question}
+Exact phrase to locate: {target_phrase}
+Long evidence packet:
+{json.dumps(evidence, ensure_ascii=False, indent=2)}
+
+The packet intentionally contains front and end distractors. Do not cite a nearby item unless it contains the exact phrase or directly supports the answer.
+"""
+
+
 def experiment_prompt(
     paper_title: str,
     selected_span: str,

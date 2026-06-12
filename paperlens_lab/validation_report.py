@@ -36,11 +36,20 @@ def build_validation_summary(root: Path | None = None) -> dict[str, Any]:
     ok = bool(
         real_paper_run
         and real_paper_run.get("passed")
+        and real_paper_run.get("paperCount", 0) >= 3
+        and real_paper_run.get("evaluationTotal", 0) > 0
+        and real_paper_run.get("evaluationPassed") == real_paper_run.get("evaluationTotal")
         and real_paper_run.get("evidenceConsistencyPassed")
+        and _adversarial_litm_passed(real_paper_run)
         and trace_summary
+        and trace_summary.get("total", 0) > 0
+        and trace_summary.get("modelCount") == trace_summary.get("total")
         and trace_summary.get("fallbackCount") == 0
         and trace_summary.get("errorCount") == 0
-        and (not local_demo or local_demo.get("sourceIndexConsistent", True))
+        and local_demo
+        and local_demo.get("sourceIndexConsistent", True)
+        and not local_demo.get("usedFallback")
+        and not local_demo.get("translationUsedFallback")
     )
     return {
         "ok": ok,
@@ -60,15 +69,13 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
         if not isinstance(body, dict):
             continue
         paper_count = int(body.get("paper_count") or len(body.get("runs", [])) or 0)
-        passed_rank = 1 if body.get("passed") else 0
         evidence_issues = _real_paper_evidence_issues(body)
-        consistency_rank = 0 if evidence_issues else 1
-        candidates.append((passed_rank, consistency_rank, paper_count, path.stat().st_mtime, path, body, evidence_issues))
+        candidates.append((path.stat().st_mtime, paper_count, path, body, evidence_issues))
     if not candidates:
         warnings.append("no real-paper summary.json found")
         return None
 
-    _, _, _, _, path, body, evidence_issues = max(candidates, key=lambda item: (item[0], item[1], item[2], item[3]))
+    _, _, path, body, evidence_issues = max(candidates, key=lambda item: item[0])
     if evidence_issues:
         warnings.append(
             f"real-paper summary evidence consistency needs rerun: {len(evidence_issues)} issue(s)"
@@ -98,6 +105,7 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
                 "readerSpanLimit": (reader.get("metadata") or {}).get("readerSpanLimit", 0),
                 "translatedSpanCount": (reader.get("metadata") or {}).get("translatedSpanCount", 0),
                 "readerSpans": reader.get("visible_span_count", 0),
+                "adversarialLitm": reader.get("adversarial_litm", {}),
                 "selectedSpanPositions": reader.get("selected_span_positions", []),
                 "evaluationsPassed": passed_here,
                 "evaluationsTotal": len(evaluations),
@@ -131,6 +139,29 @@ def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | No
     }
 
 
+def _adversarial_litm_passed(real_paper_run: dict[str, Any]) -> bool:
+    papers = real_paper_run.get("papers", []) if isinstance(real_paper_run.get("papers"), list) else []
+    if not papers:
+        return False
+    for paper in papers:
+        stats = paper.get("adversarialLitm") if isinstance(paper, dict) else {}
+        evaluations = paper.get("evaluations", []) if isinstance(paper, dict) else []
+        if not isinstance(stats, dict) or not stats:
+            return False
+        if int(stats.get("context_chars") or 0) < 8000:
+            return False
+        ratio = float(stats.get("target_char_offset_ratio") or 0)
+        if ratio < 0.35 or ratio > 0.65:
+            return False
+        if not any(
+            item.get("name") == "adversarial_lost_in_the_middle" and item.get("passed")
+            for item in evaluations
+            if isinstance(item, dict)
+        ):
+            return False
+    return True
+
+
 def _trace_summary_for_run(
     root: Path,
     real_paper_run: dict[str, Any] | None,
@@ -144,9 +175,7 @@ def _trace_summary_for_run(
             if candidate.exists():
                 trace_paths.append(candidate)
     if not trace_paths:
-        trace_paths = sorted(root.rglob("*traces.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:1]
-    if not trace_paths:
-        warnings.append("no trace JSONL found")
+        warnings.append("no matching trace JSONL found for the selected real-paper summary")
         return None
 
     task_counts: Counter[str] = Counter()
@@ -287,6 +316,31 @@ def _real_paper_evidence_issues(body: dict[str, Any]) -> list[str]:
                     continue
                 if quote and source_id and quote not in str(source_evidence.get(source_id, "")):
                     issues.append(f"{case_name}:{span_id} quote missing from {source_id}")
+        adversarial = ((run.get("model_outputs") or {}).get("adversarial_litm") or {}) if isinstance(run, dict) else {}
+        if isinstance(adversarial, dict) and adversarial:
+            stats = adversarial.get("stats") if isinstance(adversarial.get("stats"), dict) else {}
+            span_id = str(stats.get("target_span_id") or "unknown")
+            source_evidence = (
+                adversarial.get("source_evidence")
+                if isinstance(adversarial.get("source_evidence"), dict)
+                else {}
+            )
+            result = adversarial.get("result") if isinstance(adversarial.get("result"), dict) else {}
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            evidence = data.get("evidence") if isinstance(data.get("evidence"), list) else []
+            if not source_evidence:
+                issues.append(f"{case_name}:{span_id} missing adversarial source_evidence map")
+                continue
+            for item in evidence:
+                if not isinstance(item, dict):
+                    continue
+                source_id = str(item.get("source_id", ""))
+                quote = str(item.get("quote", "")).strip()
+                if source_id and source_id not in source_evidence:
+                    issues.append(f"{case_name}:{span_id} adversarial cites unknown evidence {source_id}")
+                    continue
+                if quote and source_id and quote not in str(source_evidence.get(source_id, "")):
+                    issues.append(f"{case_name}:{span_id} adversarial quote missing from {source_id}")
     return issues
 
 

@@ -11,7 +11,7 @@ from typing import Any, Callable, Optional
 import requests
 
 from .ingest import clean_text
-from .prompts import experiment_prompt, growth_prompt, qa_prompt, translation_prompt
+from .prompts import evidence_probe_prompt, experiment_prompt, growth_prompt, qa_prompt, translation_prompt
 from .tracing import TraceRecord, new_trace_id, trace_content_enabled, write_trace
 
 
@@ -123,6 +123,45 @@ class ModelGateway:
             return answer, data
 
         return self._run(task, prompt, fallback, use_model=use_model, max_new_tokens=700)
+
+    def answer_evidence_probe(
+        self,
+        paper_title: str,
+        question: str,
+        target_span_id: str,
+        target_phrase: str,
+        evidence_items: list[dict[str, str]],
+        locale: str,
+        use_model: bool = False,
+    ) -> ModelResult:
+        task = "adversarial_grounded_qa"
+        prompt = evidence_probe_prompt(paper_title, question, target_phrase, evidence_items, locale)
+        target_item = next(
+            (item for item in evidence_items if item.get("source_id") == target_span_id),
+            {"source_id": target_span_id, "text": target_phrase},
+        )
+
+        def fallback() -> tuple[str, dict[str, Any]]:
+            quote = clean_text(str(target_item.get("text", "")))[:420]
+            answer = (
+                f"긴 근거 묶음 안에서 `{target_span_id}`가 exact phrase를 포함한다. "
+                "이 근거만으로는 더 넓은 논문 전체 결론이나 fine-tuning 필요성까지 단정할 수 없다."
+                if locale == "ko"
+                else (
+                    f"In the long evidence packet, `{target_span_id}` contains the exact phrase. "
+                    "This evidence alone does not justify a broader full-paper conclusion or a fine-tuning decision."
+                )
+            )
+            data = {
+                "answer": answer,
+                "evidence": [{"source_id": target_span_id, "quote": quote}],
+                "confidence": "medium",
+                "needs_more_context": True,
+                "unsupported_assumptions": ["broader paper-level claims need more evidence"],
+            }
+            return answer, data
+
+        return self._run(task, prompt, fallback, use_model=use_model, max_new_tokens=800)
 
     def experiment_spec(
         self,
@@ -417,7 +456,7 @@ def _format_translation_text(data: dict[str, Any]) -> str:
 def _format_task_text(task: str, data: dict[str, Any]) -> str:
     if task == "translation":
         return _format_translation_text(data)
-    if task == "grounded_qa":
+    if task in {"grounded_qa", "adversarial_grounded_qa"}:
         return str(data.get("answer") or data.get("answer_ko") or data)
     if task == "experiment_spec":
         return format_experiment_spec(data)
@@ -441,7 +480,7 @@ def _validate_task_data(task: str, data: dict[str, Any]) -> list[str]:
             if not item.get("translation"):
                 errors.append(f"translation {idx} missing translation")
         return errors
-    if task == "grounded_qa":
+    if task in {"grounded_qa", "adversarial_grounded_qa"}:
         errors = []
         if not data.get("answer"):
             errors.append("missing answer")

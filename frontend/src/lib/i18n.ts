@@ -58,7 +58,7 @@ interface RightPanelText {
   me: string;
   askPlaceholder: string;
   selectFirstPlaceholder: string;
-  mockQuestionResponse: (spanPreview: string) => string;
+  backendErrorResponse: string;
 }
 
 interface LabText {
@@ -176,8 +176,8 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       me: "Me",
       askPlaceholder: "Ask about the selected sentence...",
       selectFirstPlaceholder: "Select a sentence first",
-      mockQuestionResponse: (spanPreview) =>
-        `"${spanPreview}..." is tied to one of the paper's core claims. I would answer from the cited source text first, then mark any interpretation that goes beyond the paper.`,
+      backendErrorResponse:
+        "The backend could not return a source-grounded answer. Try again after the model/API connection is healthy.",
     },
     lab: {
       subtitle: "Turn the selected sentence into an experiment",
@@ -280,8 +280,8 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       me: "나",
       askPlaceholder: "선택한 문장에 대해 질문...",
       selectFirstPlaceholder: "먼저 문장을 선택하세요",
-      mockQuestionResponse: (spanPreview) =>
-        `"${spanPreview}..."에 대한 질문이시군요. 이 부분은 논문의 핵심 주장 중 하나와 관련이 있습니다. 원문에서 명시적으로 언급된 내용을 기반으로 답변드리겠습니다.`,
+      backendErrorResponse:
+        "백엔드가 원문 근거가 묶인 답변을 반환하지 못했습니다. 모델/API 연결이 정상인지 확인한 뒤 다시 시도해주세요.",
     },
     lab: {
       subtitle: "선택한 문장을 실험으로 바꿉니다",

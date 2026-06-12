@@ -71,6 +71,13 @@ export interface ValidationSummary {
       readerSpanLimit?: number;
       translatedSpanCount?: number;
       readerSpans: number;
+      adversarialLitm?: {
+        context_span_count?: number;
+        context_chars?: number;
+        target_span_id?: string;
+        target_char_offset_ratio?: number;
+        distractor_count?: number;
+      };
       evaluationsPassed: number;
       evaluationsTotal: number;
       evaluations?: Array<{ name: string; passed: boolean; reasons: string[] }>;

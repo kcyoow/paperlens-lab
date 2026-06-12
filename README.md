@@ -103,19 +103,26 @@ Current verified snapshot:
 
 - Real arXiv/PDF papers: 3
 - Named papers: `1706.03762`, `2005.11401`, `2106.09685`
-- Real-paper evaluations: 27/27 passed in `hf_three_papers_hard_informative_v2`
-- Model traces: 21/21 stored latest real-paper traces are `status=model`, with 0 fallbacks and 0 trace errors
+- Real-paper evaluations: 30/30 passed in `hf_three_papers_adversarial_litm_v6`
+- Model traces: 24/24 stored latest real-paper traces are `status=model`, with 0 fallbacks and 0 trace errors
 - Scope: first 8 parsed PDF pages per paper, capped to 220 reader spans for the hard validation run
-- Local selected-span browser/API proof: `1706.03762`, span `P3.S9`, evidence window `P3.S6-P3.S12`, quote ids `P3.S9` and `P3.S10`
-- Evidence consistency: saved QA citations are checked against stored source-evidence maps, and local quote ids must stay inside the source-index window
+- Adversarial long-context proof: each paper includes an 8k+ character ordered evidence packet with the target evidence buried near the middle and at least 111 distractor spans; the model must cite the exact target source ID and quote without fallback
+- Local selected-span browser/API proof: `1706.03762`, span `P4.S10`, evidence window `P4.S7-P4.S13`, quote id `P4.S10`, source hash `05a99c2f80bd71e7`
+- Evidence consistency: saved QA citations are checked against stored source-evidence maps, adversarial quotes are validated against the long-context evidence packet, and local quote ids must stay inside the source-index window
 - Fine-tuning decision from real failures: `no`; no repeated trainable failure cluster has been observed yet
 
 Useful validation commands:
 
 ```bash
+RUN_ROOT="outputs/service_demo_validation/$(date +%F)"
+RUN_NAME="hf_three_papers_adversarial_litm_v6"
 PAPERLENS_PROVIDER=hf \
 PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
 PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+PAPERLENS_TRACE_PATH="$RUN_ROOT/${RUN_NAME}_traces.jsonl" \
+PAPERLENS_MEMORY_PATH="$RUN_ROOT/${RUN_NAME}_memory.jsonl" \
+PAPERLENS_SOURCE_INDEX_DIR="$RUN_ROOT/source_index" \
+PAPERLENS_TRANSLATION_CACHE_DIR="$RUN_ROOT/translation_cache" \
 .venv/bin/python -m paperlens_lab.real_paper_runner \
   --use-model \
   --paper 1706.03762 \
@@ -124,7 +131,7 @@ PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
   --max-pdf-pages 8 \
   --max-reader-spans 220 \
   --max-translate-spans 3 \
-  --output-dir outputs/service_demo_validation/$(date +%F)/hf_three_papers_hard_informative_v2
+  --output-dir "$RUN_ROOT/$RUN_NAME"
 ```
 
 ```bash

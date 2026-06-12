@@ -84,9 +84,10 @@ export default function RightPanel({
           message.id === pendingMsg.id
             ? {
                 ...pendingMsg,
-                content: text.mockQuestionResponse(
-                  locale === "ko" ? span.translated.slice(0, 40) : span.original.slice(0, 40),
-                ),
+                content: text.backendErrorResponse,
+                confidence: "low",
+                error: "backend request failed",
+                usedFallback: true,
                 isLoading: false,
               }
             : message,

@@ -32,14 +32,15 @@ class ValidationReportTests(unittest.TestCase):
         summary = build_validation_summary(self.root)
 
         self.assertTrue(summary["ok"])
-        self.assertEqual(summary["realPaperRun"]["paperCount"], 2)
-        self.assertEqual(summary["realPaperRun"]["evaluationPassed"], 4)
-        self.assertEqual(summary["realPaperRun"]["evaluationTotal"], 4)
+        self.assertEqual(summary["realPaperRun"]["paperCount"], 3)
+        self.assertEqual(summary["realPaperRun"]["evaluationPassed"], 9)
+        self.assertEqual(summary["realPaperRun"]["evaluationTotal"], 9)
         self.assertTrue(summary["realPaperRun"]["evidenceConsistencyPassed"])
         self.assertEqual(summary["realPaperRun"]["fineTuningRecommendation"], "no")
-        self.assertEqual(summary["modelTraces"]["total"], 4)
+        self.assertEqual(summary["modelTraces"]["total"], 5)
         self.assertEqual(summary["modelTraces"]["fallbackCount"], 0)
         self.assertEqual(summary["modelTraces"]["byTask"]["grounded_qa"], 1)
+        self.assertEqual(summary["modelTraces"]["byTask"]["adversarial_grounded_qa"], 1)
         self.assertEqual(summary["memory"]["recordCount"], 3)
         self.assertEqual(summary["localDemo"]["selectedSpanId"], "P3.S9")
         self.assertEqual(summary["localDemo"]["evidenceWindow"], "P3.S6-P3.S12")
@@ -115,8 +116,9 @@ class ValidationReportTests(unittest.TestCase):
 
         summary = build_validation_summary(self.root)
 
-        self.assertEqual(summary["realPaperRun"]["runName"], "hf_three_papers_rerun")
-        self.assertTrue(summary["realPaperRun"]["evidenceConsistencyPassed"])
+        self.assertEqual(summary["realPaperRun"]["runName"], "hf_three_papers_stale")
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["realPaperRun"]["evidenceConsistencyPassed"])
 
     def test_validation_endpoint_returns_summary(self):
         client = TestClient(create_app())
@@ -125,13 +127,13 @@ class ValidationReportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["modelTraces"]["modelCount"], 4)
+        self.assertEqual(body["modelTraces"]["modelCount"], 5)
         self.assertEqual(body["localDemo"]["translationStatus"], "ready")
 
     def _write_validation_tree(self):
         summary = {
             "passed": True,
-            "paper_count": 2,
+            "paper_count": 3,
             "fine_tuning": {
                 "recommendation": "no",
                 "reason": "No repeated real model-output failures.",
@@ -145,6 +147,7 @@ class ValidationReportTests(unittest.TestCase):
                     "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
                     25741,
                 ),
+                self._paper_run("lora", "2106.09685", "LoRA", 21000),
             ],
         }
         (self.run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
@@ -152,6 +155,7 @@ class ValidationReportTests(unittest.TestCase):
         trace_records = [
             {"task": "translation", "status": "model", "provider": "hf", "model": "test-small", "error": None},
             {"task": "grounded_qa", "status": "model", "provider": "hf", "model": "test-small", "error": None},
+            {"task": "adversarial_grounded_qa", "status": "model", "provider": "hf", "model": "test-small", "error": None},
             {"task": "experiment_spec", "status": "model", "provider": "hf", "model": "test-small", "error": None},
             {"task": "research_growth", "status": "model", "provider": "hf", "model": "test-small", "error": None},
         ]
@@ -224,11 +228,19 @@ class ValidationReportTests(unittest.TestCase):
             "reader": {
                 "visible_span_count": 180,
                 "selected_span_positions": [{"span_id": "P3.S9", "position_label": "middle"}],
+                "adversarial_litm": {
+                    "context_span_count": 80,
+                    "context_chars": 9000,
+                    "target_span_id": "P3.S9",
+                    "target_char_offset_ratio": 0.5,
+                    "distractor_count": 79,
+                },
             },
             "memory": {"records_after_growth": 4},
             "evaluations": [
                 {"name": "pdf_parse_and_reader_spans", "passed": True, "reasons": []},
                 {"name": "grounded_qa", "passed": True, "reasons": []},
+                {"name": "adversarial_lost_in_the_middle", "passed": True, "reasons": []},
             ],
             "model_outputs": {
                 "qa": [

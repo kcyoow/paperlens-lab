@@ -32,6 +32,16 @@ class ModelGatewayTests(unittest.TestCase):
                     "notes": [],
                 }
             )
+        if "Long evidence packet:" in prompt:
+            return json.dumps(
+                {
+                    "answer": "P4.S9 contains the middle-only evidence and does not prove a full-paper claim.",
+                    "evidence": [{"source_id": "P4.S9", "quote": "MIDSTREAM-LITM-427 improves F1 by 3.2 points."}],
+                    "confidence": "medium",
+                    "needs_more_context": True,
+                    "unsupported_assumptions": ["full-paper superiority needs broader evidence"],
+                }
+            )
         if '"confidence"' in prompt:
             return json.dumps(
                 {
@@ -98,6 +108,21 @@ class ModelGatewayTests(unittest.TestCase):
         )
         self.assertEqual(answer.data["confidence"], "high")
 
+        probe = gateway.answer_evidence_probe(
+            "Demo Paper",
+            "Find MIDSTREAM-LITM-427.",
+            "P4.S9",
+            "MIDSTREAM-LITM-427",
+            [
+                {"source_id": "P0.S1", "text": "Front distractor."},
+                {"source_id": "P4.S9", "text": "MIDSTREAM-LITM-427 improves F1 by 3.2 points."},
+                {"source_id": "P9.S1", "text": "End distractor."},
+            ],
+            "ko",
+            use_model=True,
+        )
+        self.assertEqual(probe.data["evidence"][0]["source_id"], "P4.S9")
+
         spec = gateway.experiment_spec(
             "Demo Paper",
             "We improve retrieval with evidence reranking.",
@@ -120,7 +145,7 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertEqual(growth.data["fine_tuning_signal"], "none")
 
         lines = self.trace_path.read_text(encoding="utf-8").strip().splitlines()
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 5)
         trace_text = self.trace_path.read_text(encoding="utf-8")
         self.assertNotIn("HF_TOKEN", trace_text)
         self.assertNotIn("We improve F1 by 3.2 points", trace_text)

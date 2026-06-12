@@ -121,7 +121,7 @@ def evaluate_experiment_spec(spec: dict[str, Any]) -> EvalResult:
             reasons.append("failure condition should reference the metric")
     if spec.get("ablation"):
         ablation = str(spec["ablation"]).lower()
-        if not any(term in ablation for term in ("remove", "disable", "only", "one", "without")):
+        if not any(term in ablation for term in ("remove", "disable", "only", "one", "without", "isolate")):
             reasons.append("ablation should isolate one variable")
     return EvalResult("experiment_spec", not reasons, reasons)
 
