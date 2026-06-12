@@ -26,6 +26,7 @@ from .source_index import (
 )
 from .tracing import trace_content_enabled
 from .ui import EXAMPLE_TEXT, build_demo
+from .validation_report import build_validation_summary
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -134,6 +135,10 @@ def _register_api(app: FastAPI) -> None:
             "traceContent": trace_content_enabled(),
             "runtime": "react-fastapi-gradio-hybrid",
         }
+
+    @app.get("/api/validation")
+    def validation() -> dict[str, Any]:
+        return build_validation_summary()
 
     @app.get("/api/sample-paper")
     def sample_paper() -> dict[str, Any]:

@@ -44,6 +44,74 @@ export interface GrowthResult {
   usedFallback?: boolean;
 }
 
+export interface ValidationSummary {
+  ok: boolean;
+  validationRoot?: string;
+  warnings: string[];
+  realPaperRun?: {
+    summaryPath?: string;
+    runName?: string;
+    artifactDate?: string;
+    passed: boolean;
+    paperCount: number;
+    evaluationPassed: number;
+    evaluationTotal: number;
+    fineTuningRecommendation: string;
+    fineTuningReason: string;
+    papers: Array<{
+      title: string;
+      arxiv: string;
+      pageMarkers: number;
+      sourceTextChars: number;
+      wordCount?: number;
+      totalSentenceCount?: number;
+      readerSpanLimit?: number;
+      translatedSpanCount?: number;
+      readerSpans: number;
+      evaluationsPassed: number;
+      evaluationsTotal: number;
+      evaluations?: Array<{ name: string; passed: boolean; reasons: string[] }>;
+      memoryRecordsAfterGrowth: number;
+    }>;
+  } | null;
+  modelTraces?: {
+    tracePath?: string;
+    total: number;
+    modelCount: number;
+    fallbackCount: number;
+    errorCount: number;
+    byTask: Record<string, number>;
+    byProvider: Record<string, number>;
+    byModel: Record<string, number>;
+  } | null;
+  localDemo?: {
+    paperTitle: string;
+    readerSpanCount: number;
+    sourceTextChars: number;
+    selectedSpanId: string;
+    evidenceWindow: string;
+    sourceHash?: string;
+    sourceIndexHash?: string;
+    sourceIndexConsistent?: boolean;
+    neighborSpans?: Array<{ spanId: string; textHash: string; position?: number }>;
+    quoteCount: number;
+    confidence: string;
+    needsMoreContext?: boolean;
+    provider: string;
+    model: string;
+    traceId?: string;
+    usedFallback: boolean;
+    translationStatus: string;
+    translationTraceId?: string;
+    translationUsedFallback: boolean;
+  } | null;
+  memory?: {
+    recordCount: number;
+    paperCount: number;
+    byKind: Record<string, number>;
+  } | null;
+}
+
 export interface SpanTranslationResult {
   spanId: string;
   translation: string;
@@ -83,6 +151,14 @@ export async function loadPaper(input: PaperLoadInput): Promise<PaperDocument> {
     }),
   });
   return parseJson<PaperDocument>(response);
+}
+
+export async function loadValidationSummary(): Promise<ValidationSummary> {
+  const response = await fetch(`${API_BASE}/api/validation`, {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+  });
+  return parseJson<ValidationSummary>(response);
 }
 
 export async function uploadPaper(file: File, maxPdfPages = 10): Promise<PaperDocument> {

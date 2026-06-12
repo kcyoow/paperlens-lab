@@ -92,6 +92,43 @@ PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
 .venv/bin/python -m paperlens_lab.scenario_runner --use-model --compact
 ```
 
+## Real-Paper Validation Snapshot
+
+The current local validation evidence is intentionally stored as ignored runtime
+artifacts under `outputs/service_demo_validation/2026-06-13/`. The hybrid app
+summarizes the latest available evidence at `GET /api/validation` and displays a
+compact snapshot on the landing page when those artifacts exist.
+
+Current verified snapshot:
+
+- Real arXiv/PDF papers: 3
+- Named papers: `1706.03762`, `2005.11401`, `2106.09685`
+- Real-paper evaluations: passed in the stored HF rerun summary
+- Model traces: all stored latest real-paper traces are `status=model`
+- Local selected-span browser/API proof: `1706.03762`, span `P3.S9`, evidence window `P3.S6-P3.S12`
+- Fine-tuning decision from real failures: `no`; no repeated trainable failure cluster has been observed yet
+
+Useful validation commands:
+
+```bash
+PAPERLENS_PROVIDER=hf \
+PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+.venv/bin/python -m paperlens_lab.real_paper_runner \
+  --use-model \
+  --paper 1706.03762 \
+  --paper 2005.11401 \
+  --paper 2106.09685 \
+  --max-pdf-pages 6 \
+  --max-reader-spans 180 \
+  --max-translate-spans 3 \
+  --output-dir outputs/service_demo_validation/$(date +%F)/hf_three_papers_rerun
+```
+
+```bash
+curl -sS http://127.0.0.1:7860/api/validation | jq .
+```
+
 ## Local Run
 
 Frontend product surface:

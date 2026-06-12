@@ -1,0 +1,292 @@
+from __future__ import annotations
+
+import json
+import os
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_VALIDATION_ROOT = Path("outputs") / "service_demo_validation"
+
+
+def validation_root() -> Path:
+    return Path(os.getenv("PAPERLENS_VALIDATION_ROOT", str(DEFAULT_VALIDATION_ROOT)))
+
+
+def build_validation_summary(root: Path | None = None) -> dict[str, Any]:
+    root = root or validation_root()
+    warnings: list[str] = []
+    if not root.exists():
+        return {
+            "ok": False,
+            "validationRoot": str(root),
+            "warnings": [f"validation root not found: {root}"],
+            "realPaperRun": None,
+            "modelTraces": None,
+            "localDemo": None,
+            "memory": None,
+        }
+
+    real_paper_run = _best_real_paper_run(root, warnings)
+    trace_summary = _trace_summary_for_run(root, real_paper_run, warnings)
+    local_demo = _local_demo_summary(root, warnings)
+    memory_summary = _memory_summary_for_run(root, real_paper_run, warnings)
+
+    ok = bool(
+        real_paper_run
+        and real_paper_run.get("passed")
+        and trace_summary
+        and trace_summary.get("fallbackCount") == 0
+        and trace_summary.get("errorCount") == 0
+        and (not local_demo or local_demo.get("sourceIndexConsistent", True))
+    )
+    return {
+        "ok": ok,
+        "validationRoot": str(root),
+        "warnings": warnings,
+        "realPaperRun": real_paper_run,
+        "modelTraces": trace_summary,
+        "localDemo": local_demo,
+        "memory": memory_summary,
+    }
+
+
+def _best_real_paper_run(root: Path, warnings: list[str]) -> dict[str, Any] | None:
+    candidates = []
+    for path in root.rglob("summary.json"):
+        body = _read_json(path)
+        if not isinstance(body, dict):
+            continue
+        paper_count = int(body.get("paper_count") or len(body.get("runs", [])) or 0)
+        passed_rank = 1 if body.get("passed") else 0
+        candidates.append((passed_rank, paper_count, path.stat().st_mtime, path, body))
+    if not candidates:
+        warnings.append("no real-paper summary.json found")
+        return None
+
+    _, _, _, path, body = max(candidates, key=lambda item: (item[0], item[1], item[2]))
+    runs = body.get("runs", []) if isinstance(body.get("runs"), list) else []
+    papers = []
+    evaluation_total = 0
+    evaluation_passed = 0
+    for run in runs:
+        evaluations = run.get("evaluations", []) if isinstance(run, dict) else []
+        source = run.get("source", {}) if isinstance(run, dict) else {}
+        reader = run.get("reader", {}) if isinstance(run, dict) else {}
+        memory = run.get("memory", {}) if isinstance(run, dict) else {}
+        passed_here = sum(1 for item in evaluations if item.get("passed"))
+        evaluation_total += len(evaluations)
+        evaluation_passed += passed_here
+        papers.append(
+            {
+                "name": (run.get("case") or {}).get("name", ""),
+                "arxiv": (run.get("case") or {}).get("arxiv", ""),
+                "title": source.get("title", ""),
+                "pdfUrl": source.get("pdf_url", ""),
+                "pageMarkers": source.get("page_marker_count", 0),
+                "sourceTextChars": source.get("text_chars", 0),
+                "wordCount": source.get("word_count", 0),
+                "totalSentenceCount": (reader.get("metadata") or {}).get("totalSentenceCount", 0),
+                "readerSpanLimit": (reader.get("metadata") or {}).get("readerSpanLimit", 0),
+                "translatedSpanCount": (reader.get("metadata") or {}).get("translatedSpanCount", 0),
+                "readerSpans": reader.get("visible_span_count", 0),
+                "selectedSpanPositions": reader.get("selected_span_positions", []),
+                "evaluationsPassed": passed_here,
+                "evaluationsTotal": len(evaluations),
+                "evaluations": [
+                    {
+                        "name": item.get("name", ""),
+                        "passed": bool(item.get("passed")),
+                        "reasons": item.get("reasons", []),
+                    }
+                    for item in evaluations
+                ],
+                "memoryRecordsAfterGrowth": memory.get("records_after_growth", 0),
+            }
+        )
+
+    fine_tuning = body.get("fine_tuning") if isinstance(body.get("fine_tuning"), dict) else {}
+    return {
+        "summaryPath": str(path),
+        "runName": path.parent.name,
+        "artifactDate": path.parent.parent.name,
+        "passed": bool(body.get("passed")),
+        "paperCount": int(body.get("paper_count") or len(papers)),
+        "evaluationPassed": evaluation_passed,
+        "evaluationTotal": evaluation_total,
+        "fineTuningRecommendation": fine_tuning.get("recommendation", "unknown"),
+        "fineTuningReason": fine_tuning.get("reason", ""),
+        "repeatedFailures": fine_tuning.get("repeated_failures", []),
+        "papers": papers,
+    }
+
+
+def _trace_summary_for_run(
+    root: Path,
+    real_paper_run: dict[str, Any] | None,
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    trace_paths = []
+    if real_paper_run:
+        summary_path = Path(real_paper_run.get("summaryPath", ""))
+        if summary_path.name == "summary.json":
+            candidate = summary_path.parent.parent / f"{summary_path.parent.name}_traces.jsonl"
+            if candidate.exists():
+                trace_paths.append(candidate)
+    if not trace_paths:
+        trace_paths = sorted(root.rglob("*traces.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:1]
+    if not trace_paths:
+        warnings.append("no trace JSONL found")
+        return None
+
+    task_counts: Counter[str] = Counter()
+    status_counts: Counter[str] = Counter()
+    provider_counts: Counter[str] = Counter()
+    model_counts: Counter[str] = Counter()
+    error_count = 0
+    total = 0
+    for record in _read_jsonl(trace_paths[0]):
+        if not isinstance(record, dict) or not record.get("task"):
+            continue
+        total += 1
+        task_counts[str(record.get("task"))] += 1
+        status_counts[str(record.get("status") or "unknown")] += 1
+        provider_counts[str(record.get("provider") or "unknown")] += 1
+        model_counts[str(record.get("model") or "unknown")] += 1
+        if record.get("error"):
+            error_count += 1
+
+    return {
+        "tracePath": str(trace_paths[0]),
+        "total": total,
+        "modelCount": status_counts.get("model", 0),
+        "fallbackCount": status_counts.get("fallback", 0),
+        "errorCount": error_count,
+        "byTask": dict(sorted(task_counts.items())),
+        "byProvider": dict(sorted(provider_counts.items())),
+        "byModel": dict(sorted(model_counts.items())),
+    }
+
+
+def _local_demo_summary(root: Path, warnings: list[str]) -> dict[str, Any] | None:
+    ask_paths = sorted(root.rglob("local_after_source_index_ask_*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    translate_paths = sorted(
+        root.rglob("local_after_source_index_translate_*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    paper_paths = sorted(root.rglob("local_after_source_index_paper.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not ask_paths:
+        warnings.append("no local selected-span Q&A proof found")
+        return None
+
+    ask = _read_json(ask_paths[0]) or {}
+    translate = _read_json(translate_paths[0]) if translate_paths else {}
+    paper = _read_json(paper_paths[0]) if paper_paths else {}
+    evidence_window = ask.get("evidenceWindow") if isinstance(ask.get("evidenceWindow"), dict) else {}
+    evidence = ask.get("evidence", []) if isinstance(ask.get("evidence"), list) else []
+    metadata = paper.get("metadata", {}) if isinstance(paper, dict) else {}
+    source_index = _source_index_for_local_demo(root, evidence_window)
+    source_index_hash = source_index.get("source_text_hash", "") if source_index else ""
+    source_index_chars = source_index.get("source_text_chars", 0) if source_index else 0
+    source_index_consistent = True
+    if source_index_hash and evidence_window.get("sourceHash") and source_index_hash != evidence_window.get("sourceHash"):
+        source_index_consistent = False
+        warnings.append(
+            "local selected-span source hash differs from current source index; rerun local browser/API proof for hash-bound evidence"
+        )
+    if source_index_chars and metadata.get("sourceTextChars") and source_index_chars != metadata.get("sourceTextChars"):
+        source_index_consistent = False
+        warnings.append(
+            "local paper metadata source length differs from current source index; rerun local browser/API proof"
+        )
+    return {
+        "askPath": str(ask_paths[0]),
+        "translatePath": str(translate_paths[0]) if translate_paths else "",
+        "paperPath": str(paper_paths[0]) if paper_paths else "",
+        "paperTitle": paper.get("title", ""),
+        "readerSpanCount": metadata.get("readerSpanCount", 0),
+        "sourceTextChars": metadata.get("sourceTextChars", 0),
+        "selectedSpanId": evidence_window.get("spanId", ""),
+        "evidenceWindow": evidence_window.get("spanRange", ""),
+        "sourceHash": evidence_window.get("sourceHash", ""),
+        "sourceIndexHash": source_index_hash,
+        "sourceIndexConsistent": source_index_consistent,
+        "neighborSpans": evidence_window.get("spans", []),
+        "quoteCount": len(evidence),
+        "confidence": ask.get("confidence", ""),
+        "needsMoreContext": bool(ask.get("needsMoreContext")),
+        "provider": ask.get("provider", ""),
+        "model": ask.get("model", ""),
+        "traceId": ask.get("traceId", ""),
+        "usedFallback": bool(ask.get("usedFallback")),
+        "translationStatus": translate.get("status", "") if isinstance(translate, dict) else "",
+        "translationTraceId": translate.get("traceId", "") if isinstance(translate, dict) else "",
+        "translationUsedFallback": bool(translate.get("usedFallback")) if isinstance(translate, dict) else False,
+    }
+
+
+def _memory_summary_for_run(
+    root: Path,
+    real_paper_run: dict[str, Any] | None,
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    memory_paths = []
+    if real_paper_run:
+        summary_path = Path(real_paper_run.get("summaryPath", ""))
+        if summary_path.name == "summary.json":
+            candidate = summary_path.parent.parent / f"{summary_path.parent.name}_memory.jsonl"
+            if candidate.exists():
+                memory_paths.append(candidate)
+    if not memory_paths:
+        memory_paths = sorted(root.rglob("*memory.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:1]
+    if not memory_paths:
+        warnings.append("no memory JSONL found")
+        return None
+    records = [record for record in _read_jsonl(memory_paths[0]) if isinstance(record, dict)]
+    kinds = Counter(str(record.get("kind") or "unknown") for record in records)
+    papers = Counter(str(record.get("paper_id") or "unknown") for record in records)
+    return {
+        "memoryPath": str(memory_paths[0]),
+        "recordCount": len(records),
+        "byKind": dict(sorted(kinds.items())),
+        "paperCount": len(papers),
+    }
+
+
+def _source_index_for_local_demo(root: Path, evidence_window: dict[str, Any]) -> dict[str, Any] | None:
+    paper_id = str(evidence_window.get("paperId") or "")
+    if not paper_id:
+        return None
+    safe_name = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in paper_id)[:120]
+    candidates = sorted(root.rglob(f"{safe_name}.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in candidates:
+        body = _read_json(path)
+        if body and body.get("paper_id") == paper_id and isinstance(body.get("spans"), list):
+            return body
+    return None
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _read_jsonl(path: Path) -> list[Any]:
+    records = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return records
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records

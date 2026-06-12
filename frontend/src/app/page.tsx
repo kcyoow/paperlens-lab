@@ -2,7 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { loadPaper, savePaperToSession, uploadPaper } from "@/lib/api";
+import {
+  loadPaper,
+  loadValidationSummary,
+  savePaperToSession,
+  uploadPaper,
+  ValidationSummary,
+} from "@/lib/api";
 import { getInitialLocale, LandingInputMode, Locale, UI_TEXT } from "@/lib/i18n";
 
 export default function LandingPage() {
@@ -15,11 +21,23 @@ export default function LandingPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [validationSummary, setValidationSummary] = useState<ValidationSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const text = UI_TEXT[locale].landing;
 
   useEffect(() => {
     setLocale(getInitialLocale(new URLSearchParams(window.location.search).get("lang")));
+    let cancelled = false;
+    loadValidationSummary()
+      .then((summary) => {
+        if (!cancelled) setValidationSummary(summary);
+      })
+      .catch(() => {
+        if (!cancelled) setValidationSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function handleStart() {
@@ -231,6 +249,8 @@ export default function LandingPage() {
           )}
         </div>
 
+        {validationSummary && <ValidationEvidencePanel summary={validationSummary} locale={locale} />}
+
         {/* Feature Highlights */}
         <div className="mt-8 grid grid-cols-3 gap-4">
           {[
@@ -279,6 +299,109 @@ export default function LandingPage() {
           {text.tagline}
         </p>
       </div>
+    </div>
+  );
+}
+
+function ValidationEvidencePanel({
+  summary,
+  locale,
+}: {
+  summary: ValidationSummary;
+  locale: Locale;
+}) {
+  const realPaperRun = summary.realPaperRun;
+  const traces = summary.modelTraces;
+  const localDemo = summary.localDemo;
+  const memory = summary.memory;
+  if (!realPaperRun && !traces && !localDemo) return null;
+
+  const title = locale === "ko" ? "실제 논문 검증 스냅샷" : "Real-paper validation snapshot";
+  const subtitle =
+    locale === "ko"
+      ? "현재 로컬 검증 artifact 기준이며, 새 배포 환경에서는 다시 실행해야 합니다."
+      : "Based on local validation artifacts; fresh deployments should run this again.";
+  const fineTuning = realPaperRun?.fineTuningRecommendation ?? "unknown";
+
+  return (
+    <section className="mt-5 rounded-2xl border border-border bg-surface p-5 shadow-sm">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-text-primary">{title}</p>
+          <p className="mt-1 max-w-xl text-xs text-text-muted">{subtitle}</p>
+          {realPaperRun?.artifactDate && (
+            <p className="mt-1 text-[11px] text-text-muted">
+              {realPaperRun.artifactDate} · {realPaperRun.runName || "validation run"}
+            </p>
+          )}
+        </div>
+        <span
+          className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+            summary.ok
+              ? "bg-green-100 text-green-700"
+              : "bg-yellow-100 text-yellow-700"
+          }`}
+        >
+          {summary.ok ? "model-backed" : "needs rerun"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <EvidenceMetric
+          label={locale === "ko" ? "실제 논문" : "real papers"}
+          value={String(realPaperRun?.paperCount ?? 0)}
+        />
+        <EvidenceMetric
+          label={locale === "ko" ? "평가 통과" : "eval passes"}
+          value={`${realPaperRun?.evaluationPassed ?? 0}/${realPaperRun?.evaluationTotal ?? 0}`}
+        />
+        <EvidenceMetric
+          label={locale === "ko" ? "모델 trace" : "model traces"}
+          value={`${traces?.modelCount ?? 0}/${traces?.total ?? 0}`}
+        />
+        <EvidenceMetric
+          label={locale === "ko" ? "fallback" : "fallbacks"}
+          value={String(traces?.fallbackCount ?? 0)}
+        />
+      </div>
+
+      <div className="mt-4 grid gap-3 text-xs text-text-secondary sm:grid-cols-3">
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "선택 span 근거" : "Selected-span proof"}:
+          </span>{" "}
+          {localDemo?.selectedSpanId || "n/a"} · {localDemo?.evidenceWindow || "no window"} ·{" "}
+          {localDemo?.quoteCount ?? 0} quotes
+          {localDemo?.sourceIndexConsistent === false ? " · hash rerun needed" : ""}
+        </p>
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "메모리" : "Memory"}:
+          </span>{" "}
+          {memory?.recordCount ?? 0} records across {memory?.paperCount ?? 0} papers
+        </p>
+        <p>
+          <span className="font-semibold text-text-primary">
+            {locale === "ko" ? "파인튜닝" : "Fine-tuning"}:
+          </span>{" "}
+          {fineTuning}
+        </p>
+      </div>
+
+      {summary.warnings.length > 0 && (
+        <p className="mt-3 text-[11px] text-text-muted">
+          {summary.warnings.slice(0, 2).join(" · ")}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function EvidenceMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-border bg-surface-secondary p-3">
+      <p className="text-lg font-semibold text-text-primary">{value}</p>
+      <p className="mt-0.5 text-[11px] text-text-muted">{label}</p>
     </div>
   );
 }
