@@ -23,6 +23,7 @@ class PaperSource:
     source_label: str
     text: str
     pdf_url: str = ""
+    warnings: tuple[str, ...] = ()
 
 
 def clean_text(text: str) -> str:
@@ -112,6 +113,7 @@ def build_source(
     authors = arxiv_source.authors if arxiv_source else ""
     source_label = arxiv_source.source_label if arxiv_source else "manual input"
     pdf_url = arxiv_source.pdf_url if arxiv_source else ""
+    warnings: list[str] = []
 
     fragments = []
     if arxiv_source and arxiv_source.text:
@@ -123,7 +125,8 @@ def build_source(
     elif pdf_url and not pasted:
         try:
             fragments.append(download_pdf_text(pdf_url, max_pages=max_pdf_pages))
-        except Exception:
+        except Exception as exc:
+            warnings.append(f"pdf_download_or_parse_failed: {type(exc).__name__}")
             fragments.append(arxiv_source.text if arxiv_source else "")
 
     if pasted:
@@ -139,4 +142,5 @@ def build_source(
         source_label=source_label,
         text=text,
         pdf_url=pdf_url,
+        warnings=tuple(warnings),
     )

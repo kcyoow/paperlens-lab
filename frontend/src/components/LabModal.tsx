@@ -116,10 +116,12 @@ export default function LabModal({ span, locale, paperTitle, sourceText, onClose
           if (growth.error || growth.ideas.length === 0) {
             setGrowthStatus(locale === "ko" ? "Growth fallback 확인 필요" : "Growth fallback needs review");
           } else {
+            const memorySuffix =
+              typeof growth.memoryCount === "number" ? ` · memory ${growth.memoryCount}` : "";
             setGrowthStatus(
               growth.usedFallback
-                ? `Growth ready (fallback, ${growth.fineTuningSignal})`
-                : `Growth ready (${growth.fineTuningSignal})`,
+                ? `Growth ready (fallback, ${growth.fineTuningSignal})${memorySuffix}`
+                : `Growth ready (${growth.fineTuningSignal})${memorySuffix}`,
             );
           }
         } catch {

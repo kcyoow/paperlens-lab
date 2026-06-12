@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from .analysis import experiment_card, split_sentences, top_sentences
 from .ingest import PaperSource, build_source, clean_text
+from .memory_store import append_memory, load_memories, paper_key
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
 from .tracing import trace_content_enabled
 from .ui import EXAMPLE_TEXT, build_demo
@@ -30,7 +31,8 @@ class PaperInput(BaseModel):
     pasted_text: str = ""
     max_pdf_pages: int = Field(default=10, ge=1, le=32)
     use_model: bool = False
-    max_translate_spans: int = Field(default=24, ge=1, le=48)
+    max_translate_spans: int = Field(default=24, ge=1, le=96)
+    max_reader_spans: int = Field(default=180, ge=12, le=320)
 
 
 class AskInput(BaseModel):
@@ -62,12 +64,14 @@ class TranslationInput(BaseModel):
 
 
 class GrowthInput(BaseModel):
+    paper_id: str = ""
     paper_title: str = "Untitled paper"
     selected_span: str = ""
     paper_memory: list[dict[str, Any]] = Field(default_factory=list)
     mini_lab_result: str = ""
     locale: str = "ko"
     use_model: bool = False
+    persist_memory: bool = True
 
 
 def create_app() -> FastAPI:
@@ -130,13 +134,14 @@ def _register_api(app: FastAPI) -> None:
             source = build_source(
                 uploaded_pdf=None,
                 arxiv_or_url=payload.arxiv_or_url,
-                pasted_text=payload.pasted_text or EXAMPLE_TEXT,
+                pasted_text=_paper_payload_text(payload),
                 max_pdf_pages=payload.max_pdf_pages,
             )
             return paper_document_from_source(
                 source,
                 use_model=_should_use_model(payload.use_model),
                 max_translate_spans=payload.max_translate_spans,
+                max_reader_spans=payload.max_reader_spans,
             )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -148,6 +153,7 @@ def _register_api(app: FastAPI) -> None:
         arxiv_or_url: str = Form(""),
         use_model: bool = Form(False),
         max_translate_spans: int = Form(24),
+        max_reader_spans: int = Form(180),
     ) -> dict[str, Any]:
         if not pdf.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Upload a PDF file.")
@@ -168,7 +174,8 @@ def _register_api(app: FastAPI) -> None:
         return paper_document_from_source(
             source,
             use_model=_should_use_model(use_model),
-            max_translate_spans=max(1, min(max_translate_spans, 48)),
+            max_translate_spans=max(1, min(max_translate_spans, 96)),
+            max_reader_spans=max(12, min(max_reader_spans, 320)),
         )
 
     @app.post("/api/translate")
@@ -211,15 +218,19 @@ def _register_api(app: FastAPI) -> None:
             locale=payload.locale,
             use_model=_should_use_model(payload.use_model),
         )
+        answer_data, validation_error = _validated_answer_data(result.data, payload)
         return {
             "role": "assistant",
-            "content": result.text or _fallback_answer(payload, question),
-            "supportSpanIds": _support_ids(result.data, payload.span_id),
+            "content": answer_data.get("answer") or result.text or _fallback_answer(payload, question),
+            "supportSpanIds": _support_ids(answer_data, payload.span_id),
+            "evidence": answer_data.get("evidence", []),
+            "confidence": answer_data.get("confidence", "low"),
+            "needsMoreContext": answer_data.get("needs_more_context", True),
             "model": result.model,
             "provider": result.provider,
             "traceId": result.trace_id,
-            "error": result.error,
-            "usedFallback": result.used_fallback,
+            "error": validation_error or result.error,
+            "usedFallback": result.used_fallback or bool(validation_error),
         }
 
     @app.post("/api/experiment")
@@ -259,19 +270,52 @@ def _register_api(app: FastAPI) -> None:
 
     @app.post("/api/growth")
     def growth_ideas(payload: GrowthInput) -> dict[str, Any]:
+        resolved_paper_id = payload.paper_id or paper_key(payload.paper_title)
+        persisted_memory = load_memories(resolved_paper_id) if payload.persist_memory else []
+        paper_memory = [*persisted_memory, *payload.paper_memory]
+        if payload.persist_memory and payload.selected_span:
+            append_memory(
+                resolved_paper_id,
+                kind="paper_span",
+                payload={
+                    "paper_title": payload.paper_title,
+                    "summary": payload.selected_span[:800],
+                },
+            )
+        if payload.persist_memory and payload.mini_lab_result:
+            append_memory(
+                resolved_paper_id,
+                kind="mini_lab_result",
+                payload={
+                    "paper_title": payload.paper_title,
+                    "summary": payload.mini_lab_result[:1200],
+                },
+            )
         gateway = ModelGateway()
         result = gateway.growth_ideas(
             paper_title=payload.paper_title,
-            paper_memory=payload.paper_memory,
+            paper_memory=paper_memory,
             mini_lab_result=payload.mini_lab_result,
             selected_span=payload.selected_span,
             locale=payload.locale,
             use_model=_should_use_model(payload.use_model),
         )
+        if payload.persist_memory:
+            for idea in result.data.get("ideas", []):
+                append_memory(
+                    resolved_paper_id,
+                    kind="growth_idea",
+                    payload={
+                        "paper_title": payload.paper_title,
+                        "idea": idea,
+                    },
+                )
         return {
             "ideas": result.data.get("ideas", []),
             "fineTuningSignal": result.data.get("fine_tuning_signal", "none"),
             "reason": result.data.get("reason", ""),
+            "paperId": resolved_paper_id,
+            "memoryCount": len(load_memories(resolved_paper_id)) if payload.persist_memory else len(payload.paper_memory),
             "model": result.model,
             "provider": result.provider,
             "traceId": result.trace_id,
@@ -358,13 +402,16 @@ def paper_document_from_source(
     *,
     use_model: bool = False,
     max_translate_spans: int = 24,
+    max_reader_spans: int = 180,
 ) -> dict[str, Any]:
     sentences = split_sentences(source.text)
     if not sentences:
         sentences = [source.text]
-    sentences = sentences[:48]
+    total_sentences = len(sentences)
+    reader_limit = max(12, min(max_reader_spans, 320))
+    sentences = sentences[:reader_limit]
 
-    section_count = min(5, max(1, (len(sentences) + 5) // 6))
+    section_count = min(10, max(1, (len(sentences) + 17) // 18))
     section_plans = []
     sections = []
     cursor = 0
@@ -379,7 +426,7 @@ def paper_document_from_source(
         {"span_id": _span_id(section_index, span_index + 1), "text": sentence}
         for section_index, section_sentences in section_plans
         for span_index, sentence in enumerate(section_sentences)
-    ][:max_translate_spans]
+    ][: max(1, min(max_translate_spans, 96))]
     translation_map = _translation_map(source.title, span_sources, use_model)
 
     for section_index, section_sentences in section_plans:
@@ -410,7 +457,24 @@ def paper_document_from_source(
         "sections": sections,
         "model": DEFAULT_MODEL if use_model else "fallback-extractive",
         "provider": DEFAULT_PROVIDER if use_model else "fallback",
+        "metadata": {
+            "pdfUrl": source.pdf_url,
+            "warnings": list(source.warnings),
+            "totalSentenceCount": total_sentences,
+            "readerSpanCount": len(sentences),
+            "readerSpanLimit": reader_limit,
+            "translatedSpanCount": len(translation_map),
+            "sourceTextChars": len(source.text),
+        },
     }
+
+
+def _paper_payload_text(payload: PaperInput) -> str:
+    if payload.pasted_text.strip():
+        return payload.pasted_text
+    if payload.arxiv_or_url.strip():
+        return ""
+    return EXAMPLE_TEXT
 
 
 def _translation_placeholder(sentence: str) -> str:
@@ -446,6 +510,38 @@ def _support_ids(data: dict[str, Any], fallback_span_id: str) -> list[str]:
     support_span_ids = data.get("support_span_ids", [])
     ids.extend(item for item in support_span_ids if isinstance(item, str))
     return list(dict.fromkeys(ids or [fallback_span_id]))
+
+
+def _validated_answer_data(data: dict[str, Any], payload: AskInput) -> tuple[dict[str, Any], str | None]:
+    evidence = data.get("evidence", []) if isinstance(data, dict) else []
+    source_pool = f"{payload.original}\n\n{payload.source_text}"
+    for item in evidence:
+        if not isinstance(item, dict):
+            return _insufficient_answer(payload), "answer evidence is not structured"
+        quote = clean_text(str(item.get("quote", "")))
+        if quote and quote not in source_pool:
+            return _insufficient_answer(payload), f"answer quote is not present in source evidence: {item.get('source_id', '')}"
+    return data, None
+
+
+def _insufficient_answer(payload: AskInput) -> dict[str, Any]:
+    if payload.locale == "ko":
+        answer = (
+            "이 질문은 현재 확인된 원문 근거만으로는 충분히 답하기 어렵습니다. "
+            "선택 문장과 실제 원문 quote가 맞는 범위 안에서 다시 확인해야 합니다."
+        )
+    else:
+        answer = (
+            "The current evidence is not sufficient to answer safely. "
+            "PaperLens needs a quote that is present in the selected span or source text."
+        )
+    return {
+        "answer": answer,
+        "evidence": [{"source_id": payload.span_id, "quote": payload.original[:420]}],
+        "confidence": "low",
+        "needs_more_context": True,
+        "unsupported_assumptions": ["model evidence quote failed source-substring validation"],
+    }
 
 
 def _ask_prompt(payload: AskInput, question: str) -> str:

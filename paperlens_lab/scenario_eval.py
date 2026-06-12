@@ -88,7 +88,9 @@ def evaluate_grounded_qa(
                 reasons.append(f"quote for {source_id} is not in source evidence")
     joined_evidence = " ".join(source_evidence.values()) if source_evidence else ""
     if _adds_unsupported_strength(joined_evidence, answer):
-        reasons.append("answer adds unsupported strong claim")
+        unsupported = _flatten_text(answer_data.get("unsupported_assumptions", ""))
+        if not (answer_data.get("needs_more_context") and _mentions_strong_marker(unsupported)):
+            reasons.append("answer adds unsupported strong claim")
     return EvalResult("grounded_qa", not reasons, reasons)
 
 
@@ -265,8 +267,16 @@ def _has_negation_or_limit(text: str) -> bool:
 def _adds_unsupported_strength(source: str, output: str) -> bool:
     source_lower = source.lower()
     output_lower = output.lower()
-    strong_markers = ("state-of-the-art", "sota", "proves", "guarantees", "입증", "증명", "최고", "완벽")
-    return any(marker in output_lower and marker not in source_lower for marker in strong_markers)
+    return any(marker in output_lower and marker not in source_lower for marker in _strong_markers())
+
+
+def _mentions_strong_marker(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _strong_markers())
+
+
+def _strong_markers() -> tuple[str, ...]:
+    return ("state-of-the-art", "sota", "proves", "guarantees", "입증", "증명", "최고", "완벽")
 
 
 def _flatten_text(value: Any) -> str:

@@ -11,6 +11,7 @@ export interface PaperLoadInput {
   max_pdf_pages?: number;
   use_model?: boolean;
   max_translate_spans?: number;
+  max_reader_spans?: number;
 }
 
 export interface ExperimentResult {
@@ -34,6 +35,8 @@ export interface GrowthResult {
   }>;
   fineTuningSignal: string;
   reason: string;
+  paperId?: string;
+  memoryCount?: number;
   model?: string;
   provider?: string;
   traceId?: string;
@@ -65,6 +68,7 @@ export async function loadPaper(input: PaperLoadInput): Promise<PaperDocument> {
       max_pdf_pages: input.max_pdf_pages ?? 10,
       use_model: input.use_model ?? USE_MODEL,
       max_translate_spans: input.max_translate_spans ?? 24,
+      max_reader_spans: input.max_reader_spans ?? 180,
     }),
   });
   return parseJson<PaperDocument>(response);
@@ -76,6 +80,7 @@ export async function uploadPaper(file: File, maxPdfPages = 10): Promise<PaperDo
   formData.set("max_pdf_pages", String(maxPdfPages));
   formData.set("use_model", String(USE_MODEL));
   formData.set("max_translate_spans", "24");
+  formData.set("max_reader_spans", "180");
 
   const response = await fetch(`${API_BASE}/api/paper/upload`, {
     method: "POST",
@@ -109,6 +114,9 @@ export async function askAboutSpan(params: {
     role: "assistant";
     content: string;
     supportSpanIds?: string[];
+    evidence?: Array<{ source_id?: string; quote?: string }>;
+    confidence?: "high" | "medium" | "low";
+    needsMoreContext?: boolean;
     model?: string;
     provider?: string;
     traceId?: string;
@@ -120,6 +128,9 @@ export async function askAboutSpan(params: {
     role: body.role,
     content: body.content,
     supportSpanIds: body.supportSpanIds,
+    evidence: body.evidence,
+    confidence: body.confidence,
+    needsMoreContext: body.needsMoreContext,
     isBackendGenerated: true,
     model: body.model,
     provider: body.provider,

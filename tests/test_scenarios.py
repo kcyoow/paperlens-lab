@@ -69,6 +69,20 @@ class ScenarioEvalTests(unittest.TestCase):
         self.assertTrue(any("more context" in reason for reason in result.reasons))
         self.assertTrue(any("strong claim" in reason for reason in result.reasons))
 
+    def test_grounded_qa_allows_rejecting_strong_unsupported_claims(self):
+        result = evaluate_grounded_qa(
+            {
+                "answer": "이 문장은 실험 범위만 말한다. RAG가 모든 작업에서 최고라는 주장은 추가 근거가 필요하다.",
+                "evidence": [{"source_id": "P0.S1", "quote": "We experiment with RAG in a wide range of tasks."}],
+                "confidence": "medium",
+                "needs_more_context": True,
+                "unsupported_assumptions": ["RAG가 모든 작업에서 최고라는 주장"],
+            },
+            "P0.S1",
+            source_evidence={"P0.S1": "We experiment with RAG in a wide range of tasks."},
+        )
+        self.assertTrue(result.passed, result.reasons)
+
     def test_experiment_spec_requires_runnable_fields(self):
         result = evaluate_experiment_spec(
             {

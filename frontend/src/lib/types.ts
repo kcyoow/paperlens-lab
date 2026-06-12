@@ -23,6 +23,15 @@ export interface PaperDocument {
   authors: string[];
   source: string;
   sections: Section[];
+  metadata?: {
+    pdfUrl?: string;
+    warnings?: string[];
+    totalSentenceCount?: number;
+    readerSpanCount?: number;
+    readerSpanLimit?: number;
+    translatedSpanCount?: number;
+    sourceTextChars?: number;
+  };
 }
 
 export type AnnotationType =
@@ -47,6 +56,9 @@ export interface QAMessage {
   role: "user" | "assistant";
   content: string;
   supportSpanIds?: string[];
+  evidence?: Array<{ source_id?: string; quote?: string }>;
+  confidence?: "high" | "medium" | "low";
+  needsMoreContext?: boolean;
   isExternalKnowledge?: boolean;
   isBackendGenerated?: boolean;
   isLoading?: boolean;

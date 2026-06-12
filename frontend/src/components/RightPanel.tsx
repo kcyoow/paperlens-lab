@@ -241,6 +241,11 @@ export default function RightPanel({
                     )}
                     {msg.role === "assistant" && (msg.provider || msg.usedFallback || msg.error) && (
                       <div className="mt-2 flex flex-wrap gap-1">
+                        {msg.confidence && (
+                          <span className="rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] text-text-muted">
+                            {msg.confidence}
+                          </span>
+                        )}
                         {msg.provider && (
                           <span className="rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] text-text-muted">
                             {msg.provider}
@@ -256,6 +261,16 @@ export default function RightPanel({
                             check output
                           </span>
                         )}
+                      </div>
+                    )}
+                    {msg.role === "assistant" && msg.evidence && msg.evidence.length > 0 && (
+                      <div className="mt-2 space-y-1 border-l-2 border-primary-200 pl-2">
+                        {msg.evidence.slice(0, 2).map((item, index) => (
+                          <p key={`${msg.id}-evidence-${index}`} className="text-[10px] leading-relaxed text-text-muted">
+                            {item.source_id ? `${item.source_id}: ` : ""}
+                            {item.quote}
+                          </p>
+                        ))}
                       </div>
                     )}
                   </div>
