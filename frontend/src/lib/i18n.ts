@@ -13,6 +13,7 @@ interface LandingText {
   arxivHint: string;
   pastePlaceholder: string;
   startButton: string;
+  noInputError: string;
   features: {
     sourceCompare: { title: string; desc: string };
     annotation: { title: string; desc: string };
@@ -24,6 +25,9 @@ interface LandingText {
 interface ReaderText {
   viewModes: Record<ViewMode, string>;
   languageLabel: string;
+  noPaperTitle: string;
+  noPaperDescription: string;
+  backToStart: string;
 }
 
 interface AnnotationText {
@@ -111,6 +115,7 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       arxivHint: "Enter an arXiv ID or full URL",
       pastePlaceholder: "Paste paper text here...",
       startButton: "Start reading",
+      noInputError: "Add a PDF, arXiv URL, or pasted paper text before opening the reader.",
       features: {
         sourceCompare: {
           title: "Source vs. translation",
@@ -134,6 +139,9 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
         "side-by-side": "Side by side",
       },
       languageLabel: "UI language",
+      noPaperTitle: "No paper loaded",
+      noPaperDescription: "Start from a PDF, arXiv URL, or pasted paper text so the reader is grounded in a real source.",
+      backToStart: "Back to start",
     },
     annotation: {
       tools: {
@@ -212,6 +220,7 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       arxivHint: "arXiv ID 또는 전체 URL을 입력하세요",
       pastePlaceholder: "논문 텍스트를 붙여넣으세요...",
       startButton: "논문 읽기 시작",
+      noInputError: "리더를 열기 전에 PDF, arXiv URL, 또는 논문 텍스트를 넣어주세요.",
       features: {
         sourceCompare: {
           title: "원문-번역 대조",
@@ -235,6 +244,9 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
         "side-by-side": "나란히",
       },
       languageLabel: "UI 언어",
+      noPaperTitle: "불러온 논문이 없습니다",
+      noPaperDescription: "실제 원문에 근거한 리더를 열려면 PDF, arXiv URL, 또는 논문 텍스트부터 넣어주세요.",
+      backToStart: "처음으로",
     },
     annotation: {
       tools: {

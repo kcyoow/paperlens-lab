@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { MOCK_PAPER } from "@/lib/mock-data";
 import {
   askAboutSpan,
   loadPaperFromSession,
@@ -13,6 +12,7 @@ import {
   Annotation,
   AnnotationType,
   QAMessage,
+  PaperDocument,
   Span,
 } from "@/lib/types";
 import { getInitialLocale, Locale, UI_TEXT } from "@/lib/i18n";
@@ -23,7 +23,8 @@ import AnnotationBar from "@/components/AnnotationBar";
 import LabModal from "@/components/LabModal";
 
 export default function ReaderPage() {
-  const [paper, setPaper] = useState(MOCK_PAPER);
+  const [paper, setPaper] = useState<PaperDocument | null>(null);
+  const [hasCheckedSession, setHasCheckedSession] = useState(false);
   const [locale, setLocale] = useState<Locale>("en");
   const [viewMode, setViewMode] = useState<ViewMode>("original");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
@@ -34,9 +35,7 @@ export default function ReaderPage() {
   const [qaMessages, setQaMessages] = useState<QAMessage[]>([]);
   const [showQA, setShowQA] = useState(false);
   const [labSpan, setLabSpan] = useState<Span | null>(null);
-  const [activeSectionId, setActiveSectionId] = useState<string>(
-    paper.sections[0]?.id ?? "",
-  );
+  const [activeSectionId, setActiveSectionId] = useState<string>("");
   const text = UI_TEXT[locale];
 
   useEffect(() => {
@@ -46,9 +45,10 @@ export default function ReaderPage() {
       setPaper(sessionPaper);
       setActiveSectionId(sessionPaper.sections[0]?.id ?? "");
     }
+    setHasCheckedSession(true);
   }, []);
 
-  const allSpans = paper.sections.flatMap((s) =>
+  const allSpans = (paper?.sections ?? []).flatMap((s) =>
     s.paragraphs.flatMap((p) => p.spans),
   );
 
@@ -58,6 +58,42 @@ export default function ReaderPage() {
   );
   const sourceText = allSpans.map((span) => span.original).join(" ");
 
+  if (!hasCheckedSession) {
+    return <div className="min-h-screen bg-surface" />;
+  }
+
+  if (!paper) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-surface-secondary px-4">
+        <section className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 text-center shadow-sm">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary-100 text-primary-700">
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+          </div>
+          <h1 className="text-lg font-semibold text-text-primary">{text.reader.noPaperTitle}</h1>
+          <p className="mt-2 text-sm text-text-secondary">{text.reader.noPaperDescription}</p>
+          <a
+            href={`/?lang=${locale}`}
+            className="mt-5 inline-flex rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700"
+          >
+            {text.reader.backToStart}
+          </a>
+        </section>
+      </div>
+    );
+  }
+
   function handleSpanClick(spanId: string) {
     setSelectedSpanId(spanId);
     setActiveSourceSpanId(spanId);
@@ -66,6 +102,7 @@ export default function ReaderPage() {
 
   function updateSpanTranslation(spanId: string, translated: string) {
     setPaper((currentPaper) => {
+      if (!currentPaper) return currentPaper;
       const nextPaper = {
         ...currentPaper,
         sections: currentPaper.sections.map((section) => ({
@@ -84,6 +121,7 @@ export default function ReaderPage() {
   }
 
   async function ensureSpanTranslation(spanId: string) {
+    if (!paper) return;
     const span = findSpan(spanId);
     if (!span || !isDraftTranslation(span.translated)) return;
 
@@ -127,7 +165,7 @@ export default function ReaderPage() {
   }
 
   async function handleAskAI() {
-    if (!selectedSpanId) return;
+    if (!paper || !selectedSpanId) return;
     setShowQA(true);
     const span = findSpan(selectedSpanId);
     if (!span) return;

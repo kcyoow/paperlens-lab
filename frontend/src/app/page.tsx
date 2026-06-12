@@ -53,7 +53,11 @@ export default function LandingPage() {
               ? await loadPaper({ pasted_text: pastedText.trim() })
               : null;
 
-      if (paper) savePaperToSession(paper);
+      if (!paper) {
+        setLoadError(text.noInputError);
+        return;
+      }
+      savePaperToSession(paper);
       router.push(`/reader?lang=${locale}`);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Could not load the paper.");
