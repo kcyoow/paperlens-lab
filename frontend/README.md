@@ -1,12 +1,3 @@
----
-title: PaperLens Lab Frontend
-sdk: static
-app_build_command: npm ci && npm run build
-app_file: out/index.html
-pinned: false
-license: apache-2.0
----
-
 # PaperLens Lab Frontend
 
 This folder is the current frontend baseline for PaperLens Lab.

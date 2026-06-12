@@ -3,37 +3,42 @@ title: PaperLens Lab
 emoji: "📄"
 colorFrom: green
 colorTo: gray
-sdk: gradio
-sdk_version: 5.50.0
-python_version: 3.12
-app_file: app.py
+sdk: static
+app_build_command: cd frontend && npm ci && npm run build && cp -R out/* ..
+app_file: index.html
 pinned: false
 license: apache-2.0
 ---
 
 # PaperLens Lab
 
-Translate, explain, and prototype ideas from research papers with small models.
+Read, verify, and prototype ideas from research papers.
 
-PaperLens Lab is a Hugging Face Space for turning a paper into a grounded reading guide and a small experiment card. It accepts a PDF, arXiv ID/URL, or pasted paper text, then separates direct paper claims from interpretation and generates a starter experiment scaffold.
+PaperLens Lab is moving toward a reader-first paper workspace: read the source text, compare translation, mark important lines, ask grounded questions, and turn promising ideas into small experiments.
 
 ## Frontend Preview Baseline
 
-A Next.js frontend baseline now lives in `frontend/`. It is prepared as a static-first preview for showing the product frame before the backend is connected.
+The current Hugging Face Space serves the Next.js frontend baseline from `frontend/` as a static preview. This is the product frame we will refine before connecting the backend.
 
 - Default UI language: English.
 - Optional UI language: Korean.
 - Main route: `/reader`.
-- Build output: `frontend/out/`.
+- Build output: `frontend/out/`, copied to the Space root during the Static Space build.
 - Current boundary: PDF parsing, translation generation, AI answers, and experiment generation are still mocked.
 
-## What It Does
+## Current Preview Flow
 
-- Extracts paper text from PDF, arXiv metadata, or pasted text.
-- Builds a Korean-friendly reading guide with evidence IDs.
-- Lists source-backed claims and key terms.
-- Creates an experiment card for testing a paper idea.
-- Generates a small `starter.py` scaffold for the experiment.
+- Shows a paper input landing screen.
+- Opens a reader workspace with English source text by default.
+- Switches UI language between English and Korean.
+- Switches paper view between English, Korean translation, and side-by-side.
+- Lets the user select lines, inspect source/translation, add marks, ask AI, and open Lab Mode.
+
+## Backend Prototype
+
+The earlier Gradio prototype code remains in this repository as the backend direction, but it is not the active Space runtime while the Space is configured as a static frontend preview.
+
+Later, the single-Space path should move to a Docker Space so the same URL can serve the frontend and backend together.
 
 ## Model Use
 
@@ -47,6 +52,16 @@ PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507
 The default model target is under the Build Small Hackathon's 32B limit.
 
 ## Local Run
+
+Frontend preview:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Backend prototype:
 
 ```bash
 python -m pip install -r requirements.txt
