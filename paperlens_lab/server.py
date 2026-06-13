@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from .analysis import experiment_card, split_sentences, starter_code_from_spec, top_sentences
 from .ingest import PaperSource, build_source, clean_text
 from .memory_store import append_memory, load_memories, paper_key
+from .mini_lab import MiniLabError, mini_lab_provider, run_mini_lab_job
 from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, ModelGateway
 from .scenario_eval import run_starter_code, source_contains_quote
 from .source_index import (
@@ -98,6 +99,14 @@ class StarterRunInput(BaseModel):
     code: str
 
 
+class MiniLabRunInput(BaseModel):
+    code: str
+    paper_id: str = ""
+    paper_title: str = "Untitled paper"
+    span_id: str
+    selected_span: str = ""
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="PaperLens Lab",
@@ -137,6 +146,7 @@ def _register_api(app: FastAPI) -> None:
             "gradio_path": "/gradio",
             "model": DEFAULT_MODEL,
             "provider": DEFAULT_PROVIDER,
+            "miniLabProvider": mini_lab_provider(),
             "forceModel": _force_model_enabled(),
             "traceContent": trace_content_enabled(),
             "runtime": "react-fastapi-gradio-hybrid",
@@ -381,6 +391,19 @@ def _register_api(app: FastAPI) -> None:
             "reasons": result.get("reasons", []),
             "rows": result.get("rows", []),
         }
+
+    @app.post("/api/mini-lab/run")
+    def run_mini_lab(payload: MiniLabRunInput) -> dict[str, Any]:
+        try:
+            return run_mini_lab_job(
+                code=payload.code,
+                paper_id=payload.paper_id,
+                paper_title=payload.paper_title,
+                span_id=payload.span_id,
+                selected_span=payload.selected_span,
+            )
+        except MiniLabError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @app.post("/api/growth")
     def growth_ideas(payload: GrowthInput) -> dict[str, Any]:

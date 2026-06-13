@@ -50,6 +50,25 @@ export interface StarterRunResult {
   rows: Array<Record<string, unknown>>;
 }
 
+export interface MiniLabRunResult {
+  passed: boolean;
+  reasons: string[];
+  rows: Array<Record<string, unknown>>;
+  logs: string[];
+  provider: string;
+  executionMode: string;
+  runner: string;
+  paperId: string;
+  paperTitle: string;
+  spanId: string;
+  sourceHash: string;
+  selectedSpanHash: string;
+  codeHash: string;
+  sourceIndexBound: boolean;
+  durationMs: number;
+  validation: Record<string, boolean>;
+}
+
 export interface ValidationSummary {
   ok: boolean;
   validationRoot?: string;
@@ -333,6 +352,26 @@ export async function runStarterCode(code: string): Promise<StarterRunResult> {
     body: JSON.stringify({ code }),
   });
   return parseJson<StarterRunResult>(response);
+}
+
+export async function runMiniLab(params: {
+  code: string;
+  paperId: string;
+  paperTitle: string;
+  span: Span;
+}): Promise<MiniLabRunResult> {
+  const response = await fetch(`${API_BASE}/api/mini-lab/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code: params.code,
+      paper_id: params.paperId,
+      paper_title: params.paperTitle,
+      span_id: params.span.id,
+      selected_span: params.span.original,
+    }),
+  });
+  return parseJson<MiniLabRunResult>(response);
 }
 
 export function savePaperToSession(paper: PaperDocument) {

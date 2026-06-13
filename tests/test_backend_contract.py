@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from paperlens_lab.ingest import PaperSource
+from paperlens_lab.mini_lab import code_hash
 from paperlens_lab.scenario_eval import evaluate_starter_code
 from paperlens_lab.server import create_app, paper_document_from_source
 from paperlens_lab.source_index import load_source_index, text_hash
@@ -27,6 +28,7 @@ class BackendContractTests(unittest.TestCase):
         os.environ.pop("PAPERLENS_MEMORY_PATH", None)
         os.environ.pop("PAPERLENS_SOURCE_INDEX_DIR", None)
         os.environ.pop("PAPERLENS_TRANSLATION_CACHE_DIR", None)
+        os.environ.pop("PAPERLENS_MINILAB_PROVIDER", None)
         self.tempdir.cleanup()
 
     def test_health_exposes_runtime_switches(self):
@@ -527,6 +529,154 @@ def run():
         body = response.json()
         self.assertFalse(body["passed"])
         self.assertIn("starter subprocess timed out", body["reasons"])
+
+    def test_mini_lab_run_endpoint_executes_source_bound_local_job(self):
+        source = PaperSource(
+            title="Mini Lab Paper",
+            authors="A. Author",
+            source_label="manual-mini-lab",
+            text=(
+                "First sentence introduces a compact evidence mechanism. "
+                "Second sentence says the mechanism improves precision on a tiny validation set. "
+                "Third sentence warns that the result may not generalize."
+            ),
+        )
+        document = paper_document_from_source(source, max_reader_spans=12)
+        selected = document["sections"][0]["paragraphs"][0]["spans"][1]
+        code = _valid_starter_code()
+
+        response = self.client.post(
+            "/api/mini-lab/run",
+            json={
+                "code": code,
+                "paper_id": document["id"],
+                "paper_title": document["title"],
+                "span_id": selected["id"],
+                "selected_span": selected["original"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["passed"])
+        self.assertEqual(body["provider"], "local")
+        self.assertEqual(body["sourceHash"], text_hash(selected["original"]))
+        self.assertEqual(body["codeHash"], code_hash(code))
+        self.assertTrue(body["sourceIndexBound"])
+        self.assertTrue(body["validation"]["sourceHashMatches"])
+        self.assertTrue(body["validation"]["codeHashMatches"])
+        self.assertEqual(body["rows"][0]["prototype_score"], 1.0)
+
+    def test_mini_lab_run_rejects_selected_span_mismatch(self):
+        source = PaperSource(
+            title="Mini Lab Mismatch Paper",
+            authors="A. Author",
+            source_label="manual-mini-lab-mismatch",
+            text=(
+                "First sentence defines the setup. "
+                "Second sentence is the indexed span for the mini lab. "
+                "Third sentence gives a limitation."
+            ),
+        )
+        document = paper_document_from_source(source, max_reader_spans=12)
+        selected = document["sections"][0]["paragraphs"][0]["spans"][1]
+
+        response = self.client.post(
+            "/api/mini-lab/run",
+            json={
+                "code": _valid_starter_code(),
+                "paper_id": document["id"],
+                "paper_title": document["title"],
+                "span_id": selected["id"],
+                "selected_span": "A different client-side sentence should not be accepted.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("does not match", response.json()["detail"])
+
+    def test_mini_lab_modal_result_must_match_code_hash(self):
+        os.environ["PAPERLENS_MINILAB_PROVIDER"] = "modal"
+        source = PaperSource(
+            title="Mini Lab Modal Paper",
+            authors="A. Author",
+            source_label="manual-mini-lab-modal",
+            text=(
+                "First sentence defines the setup. "
+                "Second sentence is selected for remote Modal execution. "
+                "Third sentence gives a limitation."
+            ),
+        )
+        document = paper_document_from_source(source, max_reader_spans=12)
+        selected = document["sections"][0]["paragraphs"][0]["spans"][1]
+        code = _valid_starter_code()
+
+        def fake_modal(job):
+            return {
+                "provider": "modal",
+                "executionMode": "modal-remote-function",
+                "runner": "paperlens-modal-minilab",
+                "paperId": job["paperId"],
+                "paperTitle": job["paperTitle"],
+                "spanId": job["spanId"],
+                "sourceHash": job["sourceHash"],
+                "selectedSpanHash": job["selectedSpanHash"],
+                "codeHash": "wrong-code-hash",
+                "sourceIndexBound": True,
+                "passed": True,
+                "reasons": [],
+                "rows": [
+                    {
+                        "baseline_score": 0.0,
+                        "prototype_score": 1.0,
+                        "metric": "toy",
+                        "failure_condition": "prototype_score <= baseline_score",
+                    }
+                ],
+                "logs": ["fake modal"],
+            }
+
+        with patch("paperlens_lab.mini_lab._run_modal_mini_lab_with_cli", side_effect=fake_modal):
+            response = self.client.post(
+                "/api/mini-lab/run",
+                json={
+                    "code": code,
+                    "paper_id": document["id"],
+                    "paper_title": document["title"],
+                    "span_id": selected["id"],
+                    "selected_span": selected["original"],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["passed"])
+        self.assertFalse(body["validation"]["codeHashMatches"])
+        self.assertIn("mini-lab validation failed: codeHashMatches", body["reasons"])
+
+
+def _valid_starter_code() -> str:
+    return """
+def baseline(example):
+    return example["input"]
+
+def paper_inspired(example):
+    return example["input"] + " paper"
+
+def score(output, expected):
+    return 1.0 if expected in output else 0.0
+
+def run():
+    example = {"input": "mini lab", "expected": "paper"}
+    base = baseline(example)
+    proto = paper_inspired(example)
+    return [{
+        "baseline_score": score(base, example["expected"]),
+        "prototype_score": score(proto, example["expected"]),
+        "metric": "toy score",
+        "failure_condition": "prototype_score <= baseline_score",
+    }]
+"""
 
 
 if __name__ == "__main__":

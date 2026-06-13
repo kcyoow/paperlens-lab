@@ -81,6 +81,10 @@ interface LabText {
   runningSmoke: string;
   smokePassed: string;
   smokeFailed: string;
+  runMiniLab: string;
+  runningMiniLab: string;
+  miniLabPassed: string;
+  miniLabFailed: string;
   reviewWarning: string;
   close: string;
   download: string;
@@ -204,6 +208,10 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       runningSmoke: "Running...",
       smokePassed: "Smoke passed",
       smokeFailed: "Smoke failed",
+      runMiniLab: "Run mini-lab",
+      runningMiniLab: "Running mini-lab...",
+      miniLabPassed: "Mini-lab passed",
+      miniLabFailed: "Mini-lab failed",
       reviewWarning:
         "Review generated code before expanding it beyond the built-in smoke test.",
       close: "Close",
@@ -313,6 +321,10 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       runningSmoke: "실행 중...",
       smokePassed: "smoke 통과",
       smokeFailed: "smoke 실패",
+      runMiniLab: "mini-lab 실행",
+      runningMiniLab: "mini-lab 실행 중...",
+      miniLabPassed: "mini-lab 통과",
+      miniLabFailed: "mini-lab 실패",
       reviewWarning:
         "내장 smoke test 밖으로 확장하기 전에는 생성 코드를 반드시 검토하세요.",
       close: "닫기",

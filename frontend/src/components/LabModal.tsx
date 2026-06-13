@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { buildExperiment, buildGrowthIdeas, runStarterCode } from "@/lib/api";
+import { buildExperiment, buildGrowthIdeas, MiniLabRunResult, runMiniLab, runStarterCode } from "@/lib/api";
 import { Span } from "@/lib/types";
 import { Locale, UI_TEXT } from "@/lib/i18n";
 
@@ -78,6 +78,9 @@ export default function LabModal({ span, locale, paperId, paperTitle, sourceText
   const [starterRunStatus, setStarterRunStatus] = useState("");
   const [starterRows, setStarterRows] = useState<Array<Record<string, unknown>>>([]);
   const [isRunningStarter, setIsRunningStarter] = useState(false);
+  const [miniLabStatus, setMiniLabStatus] = useState("");
+  const [miniLabResult, setMiniLabResult] = useState<MiniLabRunResult | null>(null);
+  const [isRunningMiniLab, setIsRunningMiniLab] = useState(false);
   const [copyStatus, setCopyStatus] = useState(text.copy);
 
   useEffect(() => {
@@ -85,6 +88,8 @@ export default function LabModal({ span, locale, paperId, paperTitle, sourceText
     setBackendStatus(locale === "ko" ? "백엔드 실험 카드 생성 중..." : "Generating backend experiment card...");
     setStarterRunStatus("");
     setStarterRows([]);
+    setMiniLabStatus("");
+    setMiniLabResult(null);
     setCopyStatus(text.copy);
     setGrowthIdeas([]);
     setGrowthStatus(locale === "ko" ? "다음 실험 아이디어 대기 중..." : "Waiting for next ideas...");
@@ -175,6 +180,32 @@ export default function LabModal({ span, locale, paperId, paperTitle, sourceText
       );
     } finally {
       setIsRunningStarter(false);
+    }
+  }
+
+  async function handleRunMiniLab() {
+    setIsRunningMiniLab(true);
+    setMiniLabStatus(text.runningMiniLab);
+    setMiniLabResult(null);
+    try {
+      const result = await runMiniLab({
+        code: starterCode,
+        paperId,
+        paperTitle,
+        span,
+      });
+      setMiniLabResult(result);
+      setMiniLabStatus(
+        result.passed
+          ? `${text.miniLabPassed} · ${result.provider} · ${result.rows.length} rows`
+          : `${text.miniLabFailed}: ${result.reasons.join("; ")}`,
+      );
+    } catch (error) {
+      setMiniLabStatus(
+        `${text.miniLabFailed}: ${error instanceof Error ? error.message : "backend unavailable"}`,
+      );
+    } finally {
+      setIsRunningMiniLab(false);
     }
   }
 
@@ -395,6 +426,13 @@ export default function LabModal({ span, locale, paperId, paperTitle, sourceText
                   {isRunningStarter ? text.runningSmoke : text.runSmoke}
                 </button>
                 <button
+                  onClick={handleRunMiniLab}
+                  disabled={isRunningMiniLab}
+                  className="rounded-md border border-primary-200 bg-primary-50 px-2.5 py-1 text-[11px] font-semibold text-primary-700 hover:bg-primary-100 disabled:opacity-60"
+                >
+                  {isRunningMiniLab ? text.runningMiniLab : text.runMiniLab}
+                </button>
+                <button
                   onClick={handleCopy}
                   className="rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-text-secondary hover:bg-surface-hover"
                 >
@@ -412,6 +450,36 @@ export default function LabModal({ span, locale, paperId, paperTitle, sourceText
                   <pre className="mt-2 max-h-36 overflow-auto rounded-lg bg-surface p-3 text-[11px] leading-relaxed text-text-secondary">
                     {JSON.stringify(starterRows.slice(0, 3), null, 2)}
                   </pre>
+                )}
+              </div>
+            )}
+            {miniLabStatus && (
+              <div className="border-t border-border bg-surface-secondary px-4 py-3">
+                <p className="text-xs font-semibold text-text-primary">{miniLabStatus}</p>
+                {miniLabResult && (
+                  <div className="mt-2 space-y-2">
+                    <div className="grid grid-cols-1 gap-2 text-[11px] text-text-secondary sm:grid-cols-3">
+                      <p className="rounded bg-surface px-2 py-1">
+                        provider <span className="font-mono">{miniLabResult.provider}</span>
+                      </p>
+                      <p className="rounded bg-surface px-2 py-1">
+                        source <span className="font-mono">{miniLabResult.sourceHash}</span>
+                      </p>
+                      <p className="rounded bg-surface px-2 py-1">
+                        code <span className="font-mono">{miniLabResult.codeHash}</span>
+                      </p>
+                    </div>
+                    {miniLabResult.logs.length > 0 && (
+                      <pre className="max-h-24 overflow-auto rounded-lg bg-surface p-3 text-[11px] leading-relaxed text-text-secondary">
+                        {miniLabResult.logs.slice(-6).join("\n")}
+                      </pre>
+                    )}
+                    {miniLabResult.rows.length > 0 && (
+                      <pre className="max-h-36 overflow-auto rounded-lg bg-surface p-3 text-[11px] leading-relaxed text-text-secondary">
+                        {JSON.stringify(miniLabResult.rows.slice(0, 3), null, 2)}
+                      </pre>
+                    )}
+                  </div>
                 )}
               </div>
             )}

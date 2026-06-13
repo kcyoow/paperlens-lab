@@ -27,7 +27,7 @@ The active Hugging Face Space stays on the Gradio SDK for Build Small Hackathon 
 - Main runtime: `app.py`.
 - Product frontend: `frontend/`, exported to `frontend/out`.
 - Gradio fallback/demo: `/gradio`.
-- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, experiment cards, Research Growth memory loops, and dependency-free starter smoke execution are wired through Python; full-document batch translation and full notebook execution remain staged Lab Mode extensions.
+- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, experiment cards, Research Growth memory loops, dependency-free starter smoke execution, and Modal-backed mini-lab execution are wired through Python; full-document batch translation and full notebook execution remain staged Lab Mode extensions.
 
 ## Current Preview Flow
 
@@ -46,6 +46,7 @@ The Python backend keeps the original hooks for source-grounded analysis and exp
 - `POST /api/ask` for selected-span grounded answers.
 - `POST /api/experiment` for paper-to-experiment cards and starter code.
 - `POST /api/starter/run` for executing generated dependency-free starter smoke tests.
+- `POST /api/mini-lab/run` for running the selected starter as a source/code-bound mini-lab job, locally or through Modal.
 
 The reader-first flow remains in React: original text, Korean translation draft, side-by-side checking, marks, source inspection, AI question affordance, and Lab Mode affordance.
 
@@ -73,6 +74,9 @@ Useful runtime switches:
 - `PAPERLENS_QUALITY_MODEL=...` for an optional Modal/vLLM quality model; defaults to `PAPERLENS_MODEL`
 - `PAPERLENS_TRACE_PATH=outputs/agent_traces.jsonl`
 - `PAPERLENS_TRACE_CONTENT=1` to opt into logging prompt/output text for evaluation or fine-tuning data; default traces store metadata only
+- `PAPERLENS_MINILAB_PROVIDER=local|modal` for the Lab Mode `Run mini-lab` path; `modal` uses a bounded Modal CPU function and validates returned paper/span/source/code hashes
+- `PAPERLENS_MODAL_BIN=/opt/anaconda3/bin/modal` when the Modal CLI is installed outside the active shell `PATH`
+- `PAPERLENS_MODAL_MINILAB_TIMEOUT=180` to bound the local wait for a Modal mini-lab job
 - `NEXT_PUBLIC_PAPERLENS_USE_MODEL=1` for the exported React frontend
 
 ## Backend Scenario Checks
