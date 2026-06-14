@@ -17,8 +17,9 @@ interface Props {
   annotations: Annotation[];
   allSpans: Span[];
   locale: Locale;
+  synthetic: boolean;
   onSectionClick: (sectionId: string) => void;
-  onSpanClick: (spanId: string) => void;
+  onAnnotationClick: (annotation: Annotation) => void;
 }
 
 export default function SectionNav({
@@ -27,19 +28,33 @@ export default function SectionNav({
   annotations,
   allSpans,
   locale,
+  synthetic,
   onSectionClick,
-  onSpanClick,
+  onAnnotationClick,
 }: Props) {
   const navText = UI_TEXT[locale].sectionNav;
   const annotationText = UI_TEXT[locale].annotation.tools;
+  const contentsLabel = synthetic
+    ? locale === "ko"
+      ? "추출 구간"
+      : "Extracted sections"
+    : navText.contents;
+  const contentsHint = synthetic
+    ? locale === "ko"
+      ? "실제 목차가 없어 원문을 균등 분할한 목록입니다."
+      : "No native table of contents was found, so these are extracted reading ranges."
+    : "";
 
   return (
     <aside className="flex w-48 shrink-0 flex-col border-r border-border bg-surface-secondary">
       {/* Section Navigation */}
       <div className="flex-1 overflow-y-auto p-3">
         <p className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
-          {navText.contents}
+          {contentsLabel}
         </p>
+        {contentsHint && (
+          <p className="mb-3 px-2 text-[11px] leading-5 text-text-muted">{contentsHint}</p>
+        )}
         <nav className="space-y-0.5">
           {sections.map((sec) => (
             <button
@@ -75,7 +90,7 @@ export default function SectionNav({
               return (
                 <button
                   key={ann.id}
-                  onClick={() => onSpanClick(ann.spanId)}
+                  onClick={() => onAnnotationClick(ann)}
                   className="flex w-full items-start gap-2 rounded-lg p-2 text-left transition-colors hover:bg-surface-hover"
                 >
                   <span
@@ -83,10 +98,7 @@ export default function SectionNav({
                     title={annotationText[ann.type]}
                   />
                   <span className="line-clamp-2 text-[11px] text-text-secondary">
-                    {(locale === "ko" ? span?.translated : span?.original)?.slice(
-                      0,
-                      60,
-                    )}
+                    {annotationSnippet(ann, span, locale).slice(0, 60)}
                     ...
                   </span>
                 </button>
@@ -97,4 +109,10 @@ export default function SectionNav({
       </div>
     </aside>
   );
+}
+
+function annotationSnippet(annotation: Annotation, span: Span | undefined, locale: Locale): string {
+  if (annotation.selectedText) return annotation.selectedText;
+  if (locale === "ko") return annotation.translatedText || span?.translated || "";
+  return annotation.originalText || span?.original || "";
 }

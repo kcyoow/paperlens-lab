@@ -20,14 +20,13 @@ PaperLens Lab is moving toward a reader-first paper workspace: read the source t
 
 ## Hybrid Hackathon Runtime
 
-The active Hugging Face Space stays on the Gradio SDK for Build Small Hackathon compatibility, but the product surface is a React/Next reader. `app.py` runs a FastAPI shell that serves the exported frontend at `/`, exposes Python model endpoints under `/api/*`, and keeps the Gradio demo available at `/gradio`.
+The active Hugging Face Space stays on the Gradio SDK for Build Small Hackathon compatibility, but the product surface is a React/Next reader. `app.py` runs a FastAPI shell that serves the exported frontend at `/` and exposes Python model endpoints under `/api/*`. The public demo path is the service reader, not a separate demo route.
 
 - Default UI language: English.
 - Optional UI language: Korean.
 - Main runtime: `app.py`.
-- Product frontend: `frontend/`, exported to `frontend/out`.
-- Gradio fallback/demo: `/gradio`.
-- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, experiment cards, Research Growth memory loops, dependency-free starter smoke execution, and Modal-backed mini-lab execution are wired through Python; full-document batch translation and full notebook execution remain staged Lab Mode extensions.
+- Product frontend: `frontend/`, exported to `frontend/out` and kept deployable for the Hugging Face Space.
+- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, experiment cards, Research Growth memory loops, source-evidence starter execution, and Modal-backed mini-lab execution are wired through Python; full-document batch translation and full repository reproduction remain staged Lab Mode extensions.
 
 ## Current Preview Flow
 
@@ -45,7 +44,7 @@ The Python backend keeps the original hooks for source-grounded analysis and exp
 - `POST /api/paper/upload` for PDF extraction.
 - `POST /api/ask` for selected-span grounded answers.
 - `POST /api/experiment` for paper-to-experiment cards and starter code.
-- `POST /api/starter/run` for executing generated dependency-free starter smoke tests.
+- `POST /api/starter/run` for executing generated starter code against indexed paper evidence rows.
 - `POST /api/mini-lab/run` for running the selected starter as a source/code-bound mini-lab job, locally or through Modal.
 
 The reader-first flow remains in React: original text, Korean translation draft, side-by-side checking, marks, source inspection, AI question affordance, and Lab Mode affordance.
@@ -56,21 +55,27 @@ The app works in fallback mode without external credentials. For model-backed ou
 
 ```bash
 HF_TOKEN=...
-PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507
 PAPERLENS_PROVIDER=hf
+PAPERLENS_MODEL=google/gemma-4-26B-A4B-it
+PAPERLENS_TRANSLATION_MODEL=google/gemma-4-26B-A4B-it
 ```
 
-The current Hugging Face inference smoke path uses `Qwen/Qwen3-4B-Instruct-2507`
-because it is small, under the Build Small Hackathon's 32B limit, and currently
-responds through the authenticated HF Inference path. Larger <=32B candidates
-such as Mistral Small, Magistral Small, Granite, or Gemma 4 remain Modal/vLLM
-quality-booster candidates.
+The default runtime model is now a current small multilingual model rather than
+the older Qwen3-era default. Translation has its own `PAPERLENS_TRANSLATION_MODEL`
+so Korean reading quality can move independently from general Q&A/Lab Mode.
+The current default, `google/gemma-4-26B-A4B-it`, is the latest <=32B Gemma 4
+candidate verified on this app's HF chat path. Gemma 4 12B, DiffusionGemma 26B
+A4B, Qwen3 30B A3B, and other <=32B current multilingual models remain
+configurable candidates, but a failed HF chat route should be treated as a
+serving-path mismatch until Transformers, vLLM, SGLang, or Modal has also been
+checked.
 
 Useful runtime switches:
 
 - `PAPERLENS_PROVIDER=fallback|hf|modal`
 - `PAPERLENS_FORCE_MODEL=1` to make the backend use the configured provider even when the static frontend was built with model mode off
-- `PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507`
+- `PAPERLENS_MODEL=google/gemma-4-26B-A4B-it`
+- `PAPERLENS_TRANSLATION_MODEL=google/gemma-4-26B-A4B-it`
 - `PAPERLENS_QUALITY_MODEL=...` for an optional Modal/vLLM quality model; defaults to `PAPERLENS_MODEL`
 - `PAPERLENS_TRACE_PATH=outputs/agent_traces.jsonl`
 - `PAPERLENS_TRACE_CONTENT=1` to opt into logging prompt/output text for evaluation or fine-tuning data; default traces store metadata only
@@ -92,32 +97,38 @@ configured small model:
 
 ```bash
 PAPERLENS_PROVIDER=hf \
-PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
-PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+PAPERLENS_MODEL=google/gemma-4-26B-A4B-it \
+PAPERLENS_TRANSLATION_MODEL=google/gemma-4-26B-A4B-it \
+PAPERLENS_QUALITY_MODEL=google/gemma-4-26B-A4B-it \
 .venv/bin/python -m paperlens_lab.scenario_runner --use-model --compact
 ```
 
 ## Real-Paper Validation Snapshot
 
 The current local validation evidence is intentionally stored as ignored runtime
-artifacts under `outputs/service_demo_validation/2026-06-13/`. The hybrid app
-summarizes the latest available evidence at `GET /api/validation` and displays a
-compact snapshot on the landing page when those artifacts exist.
+artifacts under `outputs/service_demo_validation/2026-06-14/`. The hybrid app
+summarizes the latest available evidence at `GET /api/validation`. The landing
+page keeps that developer/judging evidence hidden by default; open `/?evidence=1`
+or `/?debug=1` to show the compact validation snapshot.
 
-Current verified snapshot:
+Latest saved snapshot under the current Gemma 4 26B A4B default:
 
 - Real arXiv/PDF papers: 3
 - Named papers: `1706.03762`, `2005.11401`, `2106.09685`
-- Real-paper evaluations: 36/36 passed in `hf_three_papers_starter_smoke_v13`
-- Model traces: 27/27 stored latest real-paper traces are `status=model`, with 0 fallbacks and 0 trace errors
-- Trace binding: 24 summary-referenced trace IDs are present in the matching trace JSONL with `status=model` and no errors
+- Real-paper evaluations: 36/36 passed in `hf_three_papers_starter_trace_v14`
+- Model traces: `/api/validation` verifies the current Gemma 4 contract, summary trace binding, and zero fallback/error trace status for the referenced run
+- Trace binding: 27 summary-referenced trace IDs are present in the matching trace JSONL with `status=model` and no errors
+- Starter-code trace proof: all 3 saved real-paper runs include non-empty `starter_code` trace IDs with `used_fallback=false`
 - Scope: parsed 15/19/26 PDF pages for `1706.03762` / `2005.11401` / `2106.09685`; reader spans are 548/1000/1000, with larger papers capped by the 1000-span validation limit
 - Adversarial long-context proof: each paper includes an 8k+ character ordered evidence packet with the target evidence buried near the middle and at least 111 distractor spans; the model must cite the exact target source ID and quote without fallback
-- Runnable mini-lab proof: every paper generates dependency-free starter code and passes `starter_code_smoke` by parsing, importing, and running `run()`
+- Runnable mini-lab proof: every paper generates starter code and passes `starter_code_source_run` by parsing, importing, and running `run(evidence_rows)` over indexed paper evidence
 - ExperimentSpec proof: saved paper-to-lab specs are revalidated by the current evaluator so old heavy benchmark/GPU plans cannot stay green
 - Research Growth iteration proof: every paper runs a second Growth pass after the first ideas are written to memory; the second pass must cite `paper:selected-middle`, `run:r1`, and a prior `growth_idea:*` memory
-- Persistent memory proof: 14 JSONL memory records across 3 papers, including `paper_span`, `mini_lab_result`, `growth_idea`, and `growth_iteration_idea`
+- Persistent memory proof: 20 JSONL memory records across 3 papers, including `paper_span`, `mini_lab_result`, `growth_idea`, and `growth_iteration_idea`
 - Local selected-span API proof: `1706.03762`, span `P5.S8`, evidence window `P5.S5-P5.S11`, quote id `P5.S8`, source hash `824e98d76dcb7231`
+- Multi-span selection proof: `1706.03762`, spans `P0.S4` and `P0.S5`, returned `usedFallback=false`, support IDs `P0.S4/P0.S5`, and separate source quotes for each selected fragment
+- Implementation repository proof: `2106.09685`, span `P0.S9`, extracts `https://github.com/microsoft/LoRA`, inspects commit `c4593f060e6a368d7bb5af5273b8e42810cdef90` with `execution=none`, and keeps the generated starter source-bound to indexed evidence rows
+- Modal mini-lab proof: LoRA source-bound mini-lab returned `provider=modal`, `executionMode=modal-source-bound-remote-function`, `runner=paperlens-modal-minilab`, hash validation true, and `claimComparison=mixed_or_not_supported`
 - Evidence consistency: saved QA citations are checked against stored source-evidence maps, adversarial quotes are validated against the long-context evidence packet, and local quote ids must stay inside the source-index window
 - Fine-tuning decision from real failures: `no`; no repeated trainable failure cluster has been observed yet
 
@@ -125,10 +136,11 @@ Useful validation commands:
 
 ```bash
 RUN_ROOT="outputs/service_demo_validation/$(date +%F)"
-RUN_NAME="hf_three_papers_starter_smoke_v13"
+RUN_NAME="hf_three_papers_starter_trace_v14"
 PAPERLENS_PROVIDER=hf \
-PAPERLENS_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
-PAPERLENS_QUALITY_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+PAPERLENS_MODEL=google/gemma-4-26B-A4B-it \
+PAPERLENS_TRANSLATION_MODEL=google/gemma-4-26B-A4B-it \
+PAPERLENS_QUALITY_MODEL=google/gemma-4-26B-A4B-it \
 PAPERLENS_TRACE_PATH="$RUN_ROOT/${RUN_NAME}_traces.jsonl" \
 PAPERLENS_MEMORY_PATH="$RUN_ROOT/${RUN_NAME}_memory.jsonl" \
 PAPERLENS_SOURCE_INDEX_DIR="$RUN_ROOT/source_index" \
@@ -159,6 +171,11 @@ npm install
 npm run build
 ```
 
+The exported `frontend/out/` directory is intentionally deployable. The
+Hugging Face Space runs `app.py` as a Python app, so public Space sync must
+include the latest static export unless the Space build pipeline is changed to
+run the frontend build itself.
+
 Hybrid Space app:
 
 ```bash
@@ -166,7 +183,7 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Open `http://127.0.0.1:7860/` for the React reader and `http://127.0.0.1:7860/gradio` for the Gradio fallback.
+Open `http://127.0.0.1:7860/` for the React reader.
 
 ## Hackathon Entry Status
 
@@ -174,6 +191,8 @@ Open `http://127.0.0.1:7860/` for the React reader and `http://127.0.0.1:7860/gr
 - Hugging Face Space: https://huggingface.co/spaces/build-small-hackathon/paperlens-lab
 - Codex-attributed commits: this project is scaffolded and iterated with Codex as the coding agent.
 - Space README repo link: this README contains the public GitHub repository link above.
+- Local service status: current local code serves the React reader and `/api/*` from FastAPI. The public Space must be synced with the current repository state before public `/api/health` parity can be claimed.
+- Space frontend artifact: include `frontend/out/` in the synced Space files so the Python app can serve the React reader without relying on a Node build during Space startup.
 
 ## Built With Codex
 

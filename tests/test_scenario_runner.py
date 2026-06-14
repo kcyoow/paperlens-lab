@@ -37,6 +37,17 @@ class ScenarioRunnerTests(unittest.TestCase):
         self.assertEqual(run["model_outputs"]["qa"]["data"]["confidence"], "high")
         self.assertEqual(result["fine_tuning"]["recommendation"], "no")
 
+    def test_model_scenarios_fail_when_provider_falls_back(self):
+        gateway = ModelGateway(provider="hf", call_model=lambda _prompt, _model_id, _tokens: None)
+        result = run_scenarios(scenarios=default_scenarios()[:1], gateway=gateway, use_model=True)
+
+        self.assertFalse(result["passed"], result)
+        model_backing = result["runs"][0]["evaluations"][-1]
+        self.assertEqual(model_backing["name"], "model_backing")
+        self.assertFalse(model_backing["passed"])
+        self.assertIn("translation used fallback", model_backing["reasons"])
+        self.assertEqual(result["fine_tuning"]["recommendation"], "no")
+
     def fake_call(self, prompt: str, model_id: str, max_new_tokens: int):
         if '"translations"' in prompt:
             return json.dumps(
@@ -72,10 +83,10 @@ class ScenarioRunnerTests(unittest.TestCase):
                 {
                     "research_question": "Does evidence-linked reranking improve top-5 precision?",
                     "mini_lab_goal": "Compare relevance-only retrieval with evidence-linked reranking.",
-                    "dataset": {"name": "Toy retrieval set", "fallback": "10 hand-built query/passage pairs"},
+                    "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index query/passage rows"},
                     "baseline": "Relevance-only ranking",
                     "metric": "top-5 precision",
-                    "steps": ["Create toy examples", "Run baseline", "Run reranker", "Compare errors"],
+                    "steps": ["Load indexed evidence rows", "Run baseline", "Run reranker", "Compare errors"],
                     "ablation": "Remove evidence links",
                     "failure_condition": "No top-5 precision gain",
                     "expected_result": "Reranking may help citation-heavy questions.",

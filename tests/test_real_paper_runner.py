@@ -20,11 +20,14 @@ class RealPaperRunnerTests(unittest.TestCase):
         root = Path(self.tempdir.name)
         os.environ["PAPERLENS_TRACE_PATH"] = str(root / "traces.jsonl")
         os.environ["PAPERLENS_MEMORY_PATH"] = str(root / "memory.jsonl")
+        os.environ["PAPERLENS_SOURCE_INDEX_DIR"] = str(root / "source_index")
         self.output_dir = root / "real_runs"
+        self.calls: list[tuple[str, str]] = []
 
     def tearDown(self):
         os.environ.pop("PAPERLENS_TRACE_PATH", None)
         os.environ.pop("PAPERLENS_MEMORY_PATH", None)
+        os.environ.pop("PAPERLENS_SOURCE_INDEX_DIR", None)
         self.tempdir.cleanup()
 
     def test_real_paper_runner_checks_pdf_spans_litm_and_memory(self):
@@ -35,13 +38,13 @@ class RealPaperRunnerTests(unittest.TestCase):
             pdf_url="https://arxiv.org/pdf/0000.00000",
             text=self.long_pdf_text(),
         )
-        gateway = ModelGateway(provider="hf", call_model=self.fake_call)
+        gateway = ModelGateway(provider="hf", call_model=self.fake_call, quality_model_id="test-quality")
         result = run_real_paper_case(
             RealPaperCase(
                 name="real_pdf_shaped",
                 arxiv="0000.00000",
                 question="What does the selected span actually support?",
-                idea="Make a tiny experiment from the selected claim.",
+                idea="Make a source-bound experiment from the selected claim.",
             ),
             source=source,
             gateway=gateway,
@@ -57,8 +60,15 @@ class RealPaperRunnerTests(unittest.TestCase):
         labels = {item["position_label"] for item in result["reader"]["selected_span_positions"]}
         self.assertIn("middle", labels)
         self.assertGreaterEqual(result["memory"]["records_after_growth"], 3)
+        starter_output = result["model_outputs"]["starter_code"]
+        self.assertEqual(starter_output["task"], "starter_code")
+        self.assertEqual(starter_output["provider"], "hf")
+        self.assertFalse(starter_output["used_fallback"])
+        self.assertTrue(starter_output["trace_id"])
+        self.assertIn("model-generated-starter", starter_output["data"]["code"])
         saved = self.output_dir / "real_pdf_shaped.json"
         self.assertTrue(saved.exists())
+        self.assertTrue(any(model_id == "test-quality" for _, model_id in self.calls))
 
     def test_selected_spans_prefer_informative_middle_span(self):
         spans = [
@@ -95,7 +105,7 @@ class RealPaperRunnerTests(unittest.TestCase):
                 name="parse_only",
                 arxiv="0000.00001",
                 question="What does the selected span support?",
-                idea="Make a tiny experiment from the selected claim.",
+                idea="Make a source-bound experiment from the selected claim.",
             ),
             source=source,
             use_model=False,
@@ -121,14 +131,14 @@ class RealPaperRunnerTests(unittest.TestCase):
                         "idea": "Use only the prior idea.",
                         "source_evidence": ["growth_idea:abc123"],
                         "novelty_angle": "narrow",
-                        "testable_next_step": "run a toy split",
+                        "testable_next_step": "run a source-bound split",
                         "risk": "thin evidence",
                     },
                     {
                         "idea": "Use only the paper and run.",
                         "source_evidence": ["paper:selected-middle", "run:r1"],
                         "novelty_angle": "narrow",
-                        "testable_next_step": "run a toy split",
+                        "testable_next_step": "run a source-bound split",
                         "risk": "thin evidence",
                     },
                 ]
@@ -140,6 +150,7 @@ class RealPaperRunnerTests(unittest.TestCase):
         self.assertIn("together", " ".join(result.reasons))
 
     def fake_call(self, prompt: str, model_id: str, max_new_tokens: int):
+        self.calls.append((prompt, model_id))
         if '"translations"' in prompt:
             return json.dumps(
                 {
@@ -180,12 +191,20 @@ class RealPaperRunnerTests(unittest.TestCase):
                     "unsupported_assumptions": [],
                 }
             )
+        if '"why_this_matches_span"' in prompt and '"limitations"' in prompt:
+            return json.dumps(
+                {
+                    "code": self._starter_code(),
+                    "why_this_matches_span": "The starter uses query and context to compare evidence-conditioned candidates from the selected span.",
+                    "limitations": ["This source-bound run is not a reproduction of the full paper result."],
+                }
+            )
         if '"research_question"' in prompt:
             return json.dumps(
                 {
-                    "research_question": "Does the selected technique improve F1 on a toy set?",
+                    "research_question": "Does the selected technique improve F1 on indexed paper evidence?",
                     "mini_lab_goal": "Run a 30-minute baseline versus one paper-inspired variant.",
-                    "dataset": {"name": "Toy table", "fallback": "10 hand-built examples from the paper"},
+                    "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
                     "baseline": "Direct keyword baseline",
                     "metric": "F1",
                     "steps": ["Create examples", "Run baseline", "Run variant", "Compare F1"],
@@ -238,7 +257,7 @@ class RealPaperRunnerTests(unittest.TestCase):
         import json
         import re
 
-        match = re.search(r"Source spans:\n(.*?)\n$", prompt, re.DOTALL)
+        match = re.search(r"Source spans:\n(.*?)(?:\n\nRules:|\n$)", prompt, re.DOTALL)
         if not match:
             return [{"span_id": span_id, "text": ""} for span_id in self._span_ids(prompt)]
         return json.loads(match.group(1))
@@ -276,6 +295,74 @@ class RealPaperRunnerTests(unittest.TestCase):
 
         match = re.search(r"Selected span:\s*(.*?)\nAvailable translation:", prompt, re.DOTALL)
         return match.group(1).strip() if match else "The method improves 3.2 points."
+
+    def _starter_code(self):
+        return """# model-generated-starter
+def baseline(example):
+    query = example.get("query", "").lower()
+    context = " ".join(example.get("context", [])).lower()
+    best = example.get("candidates", [""])[0]
+    best_score = -1
+    for candidate in example.get("candidates", []):
+        lowered = candidate.lower()
+        score = int(lowered in query) + int(lowered in context)
+        if score > best_score:
+            best_score = score
+            best = candidate
+    return best
+
+def paper_inspired(example):
+    query = example.get("query", "").lower()
+    context = [chunk.lower() for chunk in example.get("context", [])]
+    best = example.get("candidates", [""])[0]
+    best_score = -1
+    for candidate in example.get("candidates", []):
+        lowered = candidate.lower()
+        score = 0
+        for idx, chunk in enumerate(context):
+            weight = len(context) - idx
+            if lowered in chunk:
+                score += weight
+            if query and query.split()[0] in chunk and lowered in chunk:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best = candidate
+    return best
+
+def score(output, gold):
+    return 1.0 if output == gold else 0.0
+
+def run(evidence_rows=None):
+    examples = []
+    for row in evidence_rows or []:
+        examples.append({
+            "source_id": row["source_id"],
+            "text_hash": row["text_hash"],
+            "query": row.get("query", ""),
+            "context": [row.get("text", "")],
+            "candidates": ["full-paper superiority", "controlled evidence conditions"],
+            "gold": "controlled evidence conditions" if row.get("gold") else "full-paper superiority",
+        })
+    rows = []
+    for example in examples:
+        base = baseline(example)
+        variant = paper_inspired(example)
+        baseline_score = score(base, example["gold"])
+        prototype_score = score(variant, example["gold"])
+        rows.append(
+            {
+                "baseline_score": baseline_score,
+                "prototype_score": prototype_score,
+                "metric": "span_proxy_accuracy",
+                "source_id": example["source_id"],
+                "text_hash": example["text_hash"],
+                "failure_condition": prototype_score <= baseline_score,
+                "failure_rule": "prototype_score <= baseline_score",
+            }
+        )
+    return rows
+"""
 
 
 if __name__ == "__main__":

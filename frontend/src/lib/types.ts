@@ -2,6 +2,9 @@ export interface Span {
   id: string;
   original: string;
   translated: string;
+  translationStatus?: "draft" | "ready" | "cached" | "fallback";
+  selectionKind?: "span" | "free-text";
+  selectionKey?: string;
 }
 
 export interface Paragraph {
@@ -57,8 +60,34 @@ export interface Annotation {
   id: string;
   spanId: string;
   type: AnnotationType;
+  selectedText?: string;
+  originalText?: string;
+  translatedText?: string;
+  ranges?: TextSelectionRange[];
+  selectionKey?: string;
+  surface?: "original" | "translated";
+  startOffset?: number;
+  endOffset?: number;
   note?: string;
   createdAt: number;
+}
+
+export interface TextSelection {
+  spanId: string;
+  text: string;
+  surface: "original" | "translated";
+  ranges?: TextSelectionRange[];
+  selectionKey?: string;
+  startOffset?: number;
+  endOffset?: number;
+}
+
+export interface TextSelectionRange {
+  spanId: string;
+  surface: "original" | "translated";
+  text: string;
+  startOffset: number;
+  endOffset: number;
 }
 
 export type ViewMode = "translated" | "original" | "side-by-side";

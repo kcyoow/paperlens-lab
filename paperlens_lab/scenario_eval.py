@@ -64,6 +64,9 @@ HEAVY_EXPERIMENT_BLOCKERS = (
     "distributed training",
 )
 
+SAFE_STARTER_IMPORTS = {"json", "re", "math"}
+SAFE_STARTER_IMPORTS_TEXT = "json, re, or math"
+
 
 @dataclass
 class EvalResult:
@@ -170,15 +173,54 @@ def evaluate_experiment_spec(spec: dict[str, Any]) -> EvalResult:
         reasons.append("missing failure condition")
     dataset_text = _flatten_text(spec.get("dataset", ""))
     spec_text = _flatten_text(spec)
+    dataset = spec.get("dataset")
+    forbidden_dataset_terms = (
+        "toy",
+        "hand-built",
+        "built-in example",
+        "sample dataset",
+        "synthetic",
+        "simulated",
+        "pseudo",
+        "randomly initialized",
+        "random initialization",
+        "random vector",
+        "random vectors",
+        "random-vector",
+        "random-vectors",
+        "controlled sequence",
+        "controlled-sequence",
+        "small sequence",
+        "small-sequence",
+        "generated sequence",
+        "generated-sequence",
+        "generated inputs",
+        "generated-inputs",
+    )
+    if isinstance(dataset, dict) and "fallback" in dataset:
+        reasons.append("mini-lab dataset must not define a fallback input source")
+    if any(term in dataset_text.lower() for term in forbidden_dataset_terms):
+        reasons.append("mini-lab dataset must use indexed paper evidence, not synthetic/internal examples")
+    if re.search(r"(?<![a-z0-9])toy(?![a-z0-9])", spec_text.lower()):
+        reasons.append("mini-lab spec must not describe the service experiment as toy")
+    if re.search(r"(?<![a-z0-9])(synthetic|simulated|pseudo)(?![a-z0-9])", spec_text.lower()):
+        reasons.append("mini-lab spec must use indexed paper evidence rows, not synthetic or simulated examples")
+    if re.search(
+        r"(?<![a-z0-9])(randomly initialized|random[- ]vectors?|controlled[- ]sequence|small[- ]sequence|generated[- ](?:sequence|inputs?))(?![a-z0-9])",
+        spec_text.lower(),
+    ):
+        reasons.append("mini-lab spec must use indexed paper evidence rows, not generated vector or sequence inputs")
+    if not any(term in dataset_text.lower() for term in ("indexed", "source", "evidence", "paperlens", "paper")):
+        reasons.append("mini-lab dataset must name the indexed paper evidence source")
     if any(term in spec_text.lower() for term in ("8xa100", "a100", "gpu cluster", "proprietary dataset")):
-        if not any(term in dataset_text.lower() for term in ("toy", "hand-built", "fallback", "small", "sample")):
-            reasons.append("large or proprietary setup needs a small dataset fallback")
+        if not any(term in dataset_text.lower() for term in ("indexed", "source", "evidence", "paperlens")):
+            reasons.append("large or proprietary setup must be reduced to indexed paper evidence")
     heavy_terms = experiment_heavy_terms(spec_text)
     if heavy_terms:
-        if not any(term in dataset_text.lower() for term in ("toy", "hand-built", "fallback", "small", "built-in", "5-", "10")):
-            reasons.append("mini-lab should avoid heavy training, full benchmarks, or large framework setup")
+        if not any(term in dataset_text.lower() for term in ("indexed", "source", "evidence", "paperlens")):
+            reasons.append("mini-lab should use indexed paper evidence instead of heavy training or full benchmarks")
         if any(term in HEAVY_EXPERIMENT_BLOCKERS for term in heavy_terms):
-            reasons.append("mini-lab is too heavy for a 30-60 minute undergraduate smoke test")
+            reasons.append("mini-lab is too heavy for a service demo source-bound run")
     if "metric" in spec and spec.get("metric") and spec.get("failure_condition"):
         metric_head = _normalize_metric_token(str(spec["metric"]).split(",")[0].split()[0])
         failure_text = _normalize_metric_token(str(spec["failure_condition"]))
@@ -200,18 +242,125 @@ def experiment_heavy_terms(text: str) -> list[str]:
     ]
 
 
-def evaluate_starter_code(code: str) -> EvalResult:
+def evaluate_starter_code(
+    code: str,
+    *,
+    evidence_rows: list[dict[str, Any]] | None = None,
+    require_evidence_rows: bool = False,
+) -> EvalResult:
     reasons: list[str] = []
-    smoke = run_starter_code(code)
-    if not smoke["passed"]:
-        return EvalResult("starter_code_smoke", False, list(smoke["reasons"]))
-    return EvalResult("starter_code_smoke", True, reasons)
+    execution = run_starter_code(
+        code,
+        evidence_rows=evidence_rows,
+        require_evidence_rows=require_evidence_rows,
+    )
+    if not execution["passed"]:
+        return EvalResult("starter_code_source_run", False, list(execution["reasons"]))
+    return EvalResult("starter_code_source_run", True, reasons)
 
 
-def run_starter_code(code: str) -> dict[str, Any]:
+def evaluate_starter_grounding(code: str, selected_span: str) -> EvalResult:
+    span = str(selected_span or "").strip().lower()
+    if not span:
+        return EvalResult("starter_code_grounding", True, [])
+
+    lowered = code.lower()
+    reasons: list[str] = []
+    mechanism_terms = [
+        term
+        for term in (
+            "attention",
+            "transformer",
+            "recurrence",
+            "convolution",
+            "retrieval",
+            "rerank",
+            "adapter",
+            "low-rank",
+            "lora",
+        )
+        if term in span
+    ]
+    if mechanism_terms and not any(term in lowered for term in mechanism_terms):
+        reasons.append("starter code omits the selected span mechanism terms")
+
+    generic_placeholder_terms = (
+        "capital of france",
+        "who wrote hamlet",
+        "weather like today",
+        "president of the united states",
+        "best way to learn python",
+        "meaning of life",
+        "joe biden",
+    )
+    if any(term in lowered for term in generic_placeholder_terms) and not any(
+        term in span for term in generic_placeholder_terms
+    ):
+        reasons.append("starter code uses unrelated generic examples")
+
+    keyword_only_markers = (
+        "paper_span.split()",
+        "example.split()",
+        '"paper-related" if',
+        "len(hits) >= 1",
+        "most frequent word",
+    )
+    if any(marker in lowered for marker in keyword_only_markers) and "candidates" not in lowered:
+        reasons.append("starter code still relies on keyword-only matching")
+
+    source_bound_run = "evidence_rows" in lowered and "source_id" in lowered
+
+    if "def paper_inspired" in lowered and "candidates" not in lowered and "query" not in lowered and not source_bound_run:
+        reasons.append("starter code lacks structured query/context examples")
+
+    baseline_match = re.search(r"def\s+baseline\s*\([^)]*\):(?P<body>.*?)(?:\ndef\s+|\Z)", lowered, re.DOTALL)
+    baseline_body = baseline_match.group("body") if baseline_match else lowered
+    has_first_candidate_return = re.search(r"return\s+candidates\s*\[\s*0\s*\]", baseline_body) or re.search(
+        r"""return\s+\w+\s*\[\s*['"]candidates['"]\s*\]\s*\[\s*0\s*\]""",
+        baseline_body,
+    )
+    baseline_reads_input = any(
+        marker in baseline_body
+        for marker in (
+            '["context"]',
+            "['context']",
+            '["query"]',
+            "['query']",
+            "for candidate in",
+            ".find(",
+        )
+    )
+    if has_first_candidate_return and not baseline_reads_input:
+        reasons.append("starter baseline is a trivial first-candidate selector")
+
+    if re.search(r"return\s+scores\s*(?:$|#)", lowered) or re.search(r"return\s+score_map\s*(?:$|#)", lowered):
+        reasons.append("paper_inspired returns raw scores instead of a concrete paper-grounded prediction")
+
+    if "attention" in span and not source_bound_run:
+        example_count = lowered.count('"gold":') + lowered.count("'gold':")
+        if example_count < 3:
+            reasons.append("attention-style starter uses too few structured examples")
+        has_explicit_mode = any(
+            marker in lowered
+            for marker in ('"mode":', "'mode':", 'example.get("mode"', "example.get('mode'")
+        )
+        if not has_explicit_mode:
+            reasons.append("attention-style starter lacks explicit contrast modes")
+
+    return EvalResult("starter_code_grounding", not reasons, reasons)
+
+
+def run_starter_code(
+    code: str,
+    *,
+    evidence_rows: list[dict[str, Any]] | None = None,
+    require_evidence_rows: bool = False,
+) -> dict[str, Any]:
     reasons: list[str] = []
     if not code.strip():
         return {"passed": False, "reasons": ["missing starter code"], "rows": []}
+    if require_evidence_rows and not evidence_rows:
+        return {"passed": False, "reasons": ["mini-lab requires paper evidence rows"], "rows": []}
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -229,29 +378,115 @@ def run_starter_code(code: str) -> dict[str, Any]:
         if required not in function_names:
             reasons.append(f"starter code missing {required}()")
 
-    smoke = _run_starter_code_subprocess(code)
-    reasons.extend(smoke["reasons"])
-    rows = smoke["rows"]
-    if not isinstance(rows, list) or not rows:
-        reasons.append("starter run() did not return non-empty rows")
-    else:
-        for idx, row in enumerate(rows[:3], start=1):
-            if not isinstance(row, dict):
-                reasons.append(f"starter row {idx} is not a dict")
-                continue
-            for key in ("baseline_score", "prototype_score", "metric", "failure_condition"):
-                if key not in row:
-                    reasons.append(f"starter row {idx} missing {key}")
+    execution = _run_starter_code_subprocess(
+        code,
+        evidence_rows=evidence_rows,
+        require_evidence_rows=require_evidence_rows,
+    )
+    reasons.extend(execution["reasons"])
+    rows = execution["rows"]
+    reasons.extend(_starter_row_contract_reasons(rows))
+    reasons.extend(_starter_evidence_binding_reasons(rows, evidence_rows or []))
     return {"passed": not reasons, "reasons": reasons, "rows": rows if isinstance(rows, list) else []}
 
 
-def _run_starter_code_subprocess(code: str, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+def _starter_row_contract_reasons(rows: Any) -> list[str]:
+    reasons: list[str] = []
+    if not isinstance(rows, list) or not rows:
+        return ["starter run() did not return non-empty rows"]
+    if len(rows) < 2:
+        reasons.append("starter run() should return at least two rows so the mini-lab has a contrast case")
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            reasons.append(f"starter row {idx} is not a dict")
+            continue
+        for key in ("baseline_score", "prototype_score", "metric", "failure_condition"):
+            if key not in row:
+                reasons.append(f"starter row {idx} missing {key}")
+        baseline = row.get("baseline_score")
+        prototype = row.get("prototype_score")
+        if not _is_finite_number(baseline):
+            reasons.append(f"starter row {idx} baseline_score must be numeric")
+        if not _is_finite_number(prototype):
+            reasons.append(f"starter row {idx} prototype_score must be numeric")
+        if not str(row.get("metric", "")).strip():
+            reasons.append(f"starter row {idx} metric must be non-empty")
+        failure_condition = row.get("failure_condition")
+        if not isinstance(failure_condition, bool):
+            reasons.append(f"starter row {idx} failure_condition must be a boolean")
+        if _is_finite_number(baseline) and _is_finite_number(prototype):
+            expected_failure = prototype <= baseline
+            if isinstance(failure_condition, bool) and failure_condition != expected_failure:
+                reasons.append(
+                    f"starter row {idx} failure_condition must match prototype_score <= baseline_score"
+                )
+    return reasons
+
+
+def _starter_evidence_binding_reasons(rows: Any, evidence_rows: list[dict[str, Any]]) -> list[str]:
+    if not evidence_rows:
+        return []
+    allowed = {}
+    selected_source_ids = {
+        str(row.get("source_id") or "")
+        for row in evidence_rows
+        if isinstance(row, dict) and (str(row.get("label") or "") == "selected" or row.get("gold") is True)
+    }
+    selected_seen = False
+    for row in evidence_rows:
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_id") or "")
+        if not source_id:
+            continue
+        allowed[source_id] = str(row.get("text_hash") or "")
+    reasons: list[str] = []
+    if not isinstance(rows, list):
+        return reasons
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_id") or "")
+        if not source_id:
+            reasons.append(f"starter row {idx} missing source_id")
+        elif source_id not in allowed:
+            reasons.append(f"starter row {idx} source_id is outside supplied paper evidence")
+        else:
+            if source_id in selected_source_ids:
+                selected_seen = True
+            expected_hash = allowed.get(source_id, "")
+            row_hash = str(row.get("text_hash") or "")
+            if not row_hash:
+                reasons.append(f"starter row {idx} missing text_hash")
+            elif expected_hash and row_hash != expected_hash:
+                reasons.append(f"starter row {idx} text_hash does not match supplied paper evidence")
+    if selected_source_ids and not selected_seen:
+        reasons.append("starter rows must include the selected paper evidence row")
+    return reasons
+
+
+def _is_finite_number(value: Any) -> bool:
+    return type(value) in {int, float} and value == value and value not in {float("inf"), float("-inf")}
+
+
+def _run_starter_code_subprocess(
+    code: str,
+    *,
+    evidence_rows: list[dict[str, Any]] | None = None,
+    require_evidence_rows: bool = False,
+    timeout_seconds: float = 2.0,
+) -> dict[str, Any]:
     encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    encoded_evidence = base64.b64encode(
+        json.dumps(evidence_rows or [], ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
     runner = textwrap.dedent(
         """
         import ast
         import base64
         import json
+        import math
+        import re
         import sys
 
         try:
@@ -263,22 +498,30 @@ def _run_starter_code_subprocess(code: str, *, timeout_seconds: float = 2.0) -> 
             pass
 
         def safe_import(name, globals_=None, locals_=None, fromlist=(), level=0):
-            if name == "json" and level == 0:
-                return json
-            raise ImportError(f"starter code may only import json, not {name}")
+            if level == 0 and name in {"json", "re", "math"}:
+                return {"json": json, "re": re, "math": math}[name]
+            raise ImportError(f"starter code may only import {SAFE_STARTER_IMPORTS_TEXT}, not {name}")
 
         safe_builtins = {
+            "all": all,
+            "any": any,
             "__import__": safe_import,
             "abs": abs,
             "bool": bool,
+            "chr": chr,
             "dict": dict,
             "enumerate": enumerate,
+            "Exception": Exception,
             "float": float,
+            "hash": hash,
             "int": int,
+            "isinstance": isinstance,
             "len": len,
             "list": list,
             "max": max,
             "min": min,
+            "ord": ord,
+            "print": print,
             "range": range,
             "round": round,
             "set": set,
@@ -286,10 +529,18 @@ def _run_starter_code_subprocess(code: str, *, timeout_seconds: float = 2.0) -> 
             "str": str,
             "sum": sum,
             "tuple": tuple,
+            "ValueError": ValueError,
+            "zip": zip,
         }
 
         code = base64.b64decode(sys.argv[1]).decode("utf-8")
-        namespace = {"__name__": "paperlens_starter_smoke", "__builtins__": safe_builtins}
+        evidence_rows = json.loads(base64.b64decode(sys.argv[2]).decode("utf-8"))
+        require_evidence_rows = sys.argv[3] == "1"
+        namespace = {
+            "__name__": "paperlens_starter_source_run",
+            "__builtins__": safe_builtins,
+            "PAPERLENS_EVIDENCE_ROWS": evidence_rows,
+        }
         result = {"passed": False, "reasons": [], "rows": []}
         try:
             tree = ast.parse(code)
@@ -298,7 +549,20 @@ def _run_starter_code_subprocess(code: str, *, timeout_seconds: float = 2.0) -> 
             if not callable(run):
                 result["reasons"].append("starter code missing runnable run()")
             else:
-                rows = run()
+                if evidence_rows:
+                    try:
+                        rows = run(evidence_rows)
+                    except TypeError as exc:
+                        if require_evidence_rows:
+                            result["reasons"].append(f"starter run() must accept paper evidence rows: {exc}")
+                            rows = []
+                        else:
+                            rows = run()
+                elif require_evidence_rows:
+                    result["reasons"].append("mini-lab requires paper evidence rows")
+                    rows = []
+                else:
+                    rows = run()
                 result["rows"] = rows if isinstance(rows, list) else []
                 result["passed"] = isinstance(rows, list)
         except Exception as exc:
@@ -308,7 +572,15 @@ def _run_starter_code_subprocess(code: str, *, timeout_seconds: float = 2.0) -> 
     ).strip()
     try:
         completed = subprocess.run(
-            [sys.executable, "-I", "-c", runner, encoded],
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                runner,
+                encoded,
+                encoded_evidence,
+                "1" if require_evidence_rows else "0",
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -354,8 +626,8 @@ def _starter_code_safety_reasons(tree: ast.AST) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             names = [alias.name.split(".")[0] for alias in node.names]
-            if any(name != "json" for name in names):
-                reasons.append("starter code may only import json")
+            if any(name not in SAFE_STARTER_IMPORTS for name in names):
+                reasons.append(f"starter code may only import {SAFE_STARTER_IMPORTS_TEXT}")
         elif isinstance(node, ast.Name) and (
             node.id in forbidden_names or (node.id.startswith("__") and node.id != "__name__")
         ):
@@ -376,6 +648,16 @@ def evaluate_growth_ideas(
         reasons.append("missing ideas")
     has_multi_source_idea = False
     for idx, idea in enumerate(ideas, start=1):
+        idea_text = _flatten_text(idea)
+        if any(term in idea_text.lower() for term in ("toy", "toy setup", "toy dataset", "toy scale")):
+            reasons.append(f"idea {idx} describes the source-evidence mini-lab as toy")
+        if re.search(r"(?<![a-z0-9])(synthetic|simulated|pseudo)(?![a-z0-9])", idea_text.lower()):
+            reasons.append(f"idea {idx} invents synthetic or simulated follow-up inputs")
+        if re.search(
+            r"(?<![a-z0-9])(randomly initialized|random[- ]vectors?|controlled[- ]sequence|small[- ]sequence|generated[- ](?:sequence|inputs?))(?![a-z0-9])",
+            idea_text.lower(),
+        ):
+            reasons.append(f"idea {idx} invents generated vector or sequence follow-up inputs")
         evidence_ids = idea.get("source_evidence") or []
         if not evidence_ids:
             reasons.append(f"idea {idx} missing evidence")
@@ -410,7 +692,7 @@ def fine_tuning_gate(failures: list[str | FailureRecord]) -> dict[str, Any]:
         }
     return {
         "recommendation": "maybe",
-        "reason": "Repeated model-output failures survived the same task boundary and may justify a tiny task-specific fine-tune.",
+        "reason": "Repeated model-output failures survived the same task boundary and may justify a bounded task-specific fine-tune.",
         "repeated_failures": repeated,
     }
 
@@ -431,7 +713,7 @@ def _fine_tuning_gate_records(failures: list[FailureRecord]) -> dict[str, Any]:
     if repeated:
         return {
             "recommendation": "maybe",
-            "reason": "Repeated task-specific failures remain after prompt/RAG/parser fixes; prepare a tiny SFT/LoRA probe.",
+            "reason": "Repeated task-specific failures remain after prompt/RAG/parser fixes; prepare a bounded SFT/LoRA probe.",
             "repeated_failures": repeated,
         }
     untried = [
@@ -558,7 +840,7 @@ def _mentions_strong_marker(text: str) -> bool:
 
 
 def _strong_markers() -> tuple[str, ...]:
-    return ("state-of-the-art", "sota", "proves", "guarantees", "입증", "증명", "최고", "완벽")
+    return ("state-of-the-art", "sota", "proves", "proven", "guarantees", "입증", "증명", "최고", "완벽")
 
 
 def _strong_marker_supported(source_lower: str, marker: str) -> bool:

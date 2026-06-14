@@ -6,6 +6,7 @@ from paperlens_lab.scenario_eval import (
     evaluate_grounded_qa,
     evaluate_growth_ideas,
     evaluate_starter_code,
+    evaluate_starter_grounding,
     evaluate_translation,
     fine_tuning_gate,
 )
@@ -90,7 +91,7 @@ class ScenarioEvalTests(unittest.TestCase):
 
     def test_translation_still_rejects_unsupported_proof_claims(self):
         result = evaluate_translation(
-            "The method improves F1 in a toy setting.",
+            "The method improves F1 in a controlled evidence setting.",
             {
                 "translations": [
                     {
@@ -119,12 +120,12 @@ class ScenarioEvalTests(unittest.TestCase):
         result = evaluate_grounded_qa(
             {
                 "answer": "이 문장은 SOTA를 증명한다.",
-                "evidence": [{"source_id": "P0.S1", "quote": "toy setting improves F1"}],
+                "evidence": [{"source_id": "P0.S1", "quote": "controlled evidence setting improves F1"}],
                 "confidence": "high",
                 "needs_more_context": False,
             },
             "P0.S1",
-            source_evidence={"P0.S1": "In a toy setting, the method improves F1."},
+            source_evidence={"P0.S1": "In a controlled evidence setting, the method improves F1."},
             require_needs_more_context=True,
         )
         self.assertFalse(result.passed)
@@ -189,7 +190,7 @@ class ScenarioEvalTests(unittest.TestCase):
             {
                 "research_question": "Does reranking help?",
                 "mini_lab_goal": "Compare baseline and reranker.",
-                "dataset": {"name": "Toy set", "fallback": "Hand-built examples"},
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index spans"},
                 "baseline": "BM25",
                 "metric": "top-5 precision",
                 "steps": ["Prepare data", "Run baseline", "Run reranker"],
@@ -198,7 +199,7 @@ class ScenarioEvalTests(unittest.TestCase):
         )
         self.assertTrue(result.passed, result.reasons)
 
-    def test_starter_code_smoke_requires_runnable_run_rows(self):
+    def test_starter_code_source_run_requires_runnable_run_rows(self):
         code = """
 def baseline(example):
     return {"prediction": "base"}
@@ -207,22 +208,166 @@ def paper_inspired(example):
     return {"prediction": "proto"}
 
 def score(output, expected):
-    return 1.0
+    return 1.0 if output["prediction"] == expected else 0.0
 
-def run():
-    return [{"baseline_score": 0.0, "prototype_score": 1.0, "metric": "accuracy", "failure_condition": "no gain"}]
+def run(evidence_rows=None):
+    examples = evidence_rows or []
+    rows = []
+    for example in examples:
+        base = baseline(example)
+        proto = paper_inspired(example)
+        expected = "proto" if example.get("gold") else "base"
+        baseline_score = score(base, expected)
+        prototype_score = score(proto, expected)
+        rows.append({
+            "source_id": example["source_id"],
+            "text_hash": example["text_hash"],
+            "baseline_score": baseline_score,
+            "prototype_score": prototype_score,
+            "metric": "accuracy",
+            "failure_condition": prototype_score <= baseline_score,
+            "failure_rule": "prototype_score <= baseline_score",
+        })
+    return rows
 """
-        result = evaluate_starter_code(code)
+        result = evaluate_starter_code(code, evidence_rows=_source_rows(), require_evidence_rows=True)
 
         self.assertTrue(result.passed, result.reasons)
 
-    def test_starter_code_smoke_rejects_missing_run_contract(self):
+    def test_starter_code_source_run_rejects_missing_run_contract(self):
         result = evaluate_starter_code("def baseline(example):\n    return {}\n")
 
         self.assertFalse(result.passed)
         self.assertTrue(any("run()" in reason for reason in result.reasons))
 
-    def test_experiment_spec_rejects_large_setup_without_toy_fallback(self):
+    def test_starter_code_source_run_rejects_failure_flag_mismatch(self):
+        code = """
+def baseline(example):
+    return {"prediction": "base"}
+
+def paper_inspired(example):
+    return {"prediction": "proto"}
+
+def score(output, expected):
+    return 1.0 if output["prediction"] == expected else 0.0
+
+def run(evidence_rows=None):
+    return [
+        {
+            "source_id": "P0.S1",
+            "baseline_score": 1.0,
+            "prototype_score": 1.0,
+            "metric": "accuracy",
+            "failure_condition": False,
+            "failure_rule": "prototype_score <= baseline_score",
+        },
+        {
+            "source_id": "P0.S2",
+            "baseline_score": 0.0,
+            "prototype_score": 1.0,
+            "metric": "accuracy",
+            "failure_condition": False,
+            "failure_rule": "prototype_score <= baseline_score",
+        },
+    ]
+"""
+        result = evaluate_starter_code(code, evidence_rows=_source_rows(), require_evidence_rows=True)
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("failure_condition must match" in reason for reason in result.reasons))
+
+    def test_starter_grounding_rejects_unrelated_generic_examples(self):
+        code = """
+SELECTED_SPAN = "compact evidence reranker improves top five precision"
+
+def baseline(example):
+    return {"prediction": example["candidates"][0]}
+
+def paper_inspired(example):
+    return {"prediction": "Paris"}
+
+def score(output, expected):
+    return 1.0 if output["prediction"] == expected else 0.0
+
+def run():
+    return [
+        {
+            "query": "What is the capital of France?",
+            "context": SELECTED_SPAN,
+            "candidates": ["Paris", "London"],
+            "baseline_score": 0.0,
+            "prototype_score": 1.0,
+            "metric": "Top-5 Precision",
+            "failure_condition": False,
+            "failure_rule": "prototype_score <= baseline_score",
+        },
+        {
+            "query": "Who wrote Hamlet?",
+            "context": "contrast control",
+            "candidates": ["Shakespeare", "Marlowe"],
+            "baseline_score": 1.0,
+            "prototype_score": 1.0,
+            "metric": "Top-5 Precision",
+            "failure_condition": True,
+            "failure_rule": "prototype_score <= baseline_score",
+        },
+    ]
+"""
+        result = evaluate_starter_grounding(
+            code,
+            "compact evidence reranker improves top five precision",
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("starter code uses unrelated generic examples", result.reasons)
+
+    def test_starter_code_source_run_allows_math_and_isinstance(self):
+        code = """
+import math
+
+def baseline(example):
+    values = example.get("values", [])
+    if not isinstance(values, list) or not values:
+        return {"prediction": 0.0}
+    return {"prediction": values[0]}
+
+def paper_inspired(example):
+    values = example.get("values", [])
+    norm = math.sqrt(sum(value * value for value in values)) if values else 0.0
+    return {"prediction": round(norm, 3)}
+
+def score(output, expected):
+    return 1.0 if output["prediction"] == expected else 0.0
+
+def run(evidence_rows=None):
+    examples = [
+        {**row, "values": [3.0, 4.0], "expected": 5.0}
+        if row.get("gold")
+        else {**row, "values": [2.0, 2.0], "expected": 2.0}
+        for row in (evidence_rows or [])
+    ]
+    rows = []
+    for example in examples:
+        base = baseline(example)
+        proto = paper_inspired(example)
+        baseline_score = score(base, example["expected"])
+        prototype_score = score(proto, example["expected"])
+        rows.append({
+            "source_id": example["source_id"],
+            "text_hash": example["text_hash"],
+            "baseline_score": baseline_score,
+            "prototype_score": prototype_score,
+            "metric": "source evidence accuracy",
+            "failure_condition": prototype_score <= baseline_score,
+            "failure_rule": "prototype_score <= baseline_score",
+        })
+    return rows
+"""
+        result = evaluate_starter_code(code, evidence_rows=_source_rows(), require_evidence_rows=True)
+
+        self.assertTrue(result.passed, result.reasons)
+
+    def test_experiment_spec_rejects_large_setup_without_indexed_evidence(self):
         result = evaluate_experiment_spec(
             {
                 "research_question": "Does the method scale?",
@@ -236,7 +381,65 @@ def run():
             }
         )
         self.assertFalse(result.passed)
-        self.assertTrue(any("small dataset fallback" in reason for reason in result.reasons))
+        self.assertTrue(any("indexed paper evidence" in reason for reason in result.reasons))
+
+    def test_experiment_spec_rejects_synthetic_or_simulated_inputs(self):
+        result = evaluate_experiment_spec(
+            {
+                "research_question": "Does attention handle long-range dependencies?",
+                "mini_lab_goal": "Create a synthetic sequence and compare it with a simulated baseline.",
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                "baseline": "Moving average proxy",
+                "metric": "source evidence score",
+                "steps": ["Create synthetic examples", "Run baseline", "Run variant"],
+                "ablation": "Disable only the attention scorer.",
+                "failure_condition": "source evidence score does not improve.",
+            }
+        )
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("synthetic" in reason for reason in result.reasons))
+
+    def test_experiment_spec_rejects_dataset_fallback_source(self):
+        result = evaluate_experiment_spec(
+            {
+                "research_question": "Does attention handle long-range dependencies?",
+                "mini_lab_goal": "Compare attention on indexed rows.",
+                "dataset": {
+                    "name": "Indexed PaperLens evidence window",
+                    "source": "source-index rows",
+                    "fallback": "random vectors",
+                },
+                "baseline": "Direct baseline",
+                "metric": "source evidence score",
+                "steps": ["Load indexed rows", "Run baseline", "Run variant"],
+                "ablation": "Disable only the attention scorer.",
+                "failure_condition": "source evidence score does not improve.",
+            }
+        )
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("fallback input source" in reason for reason in result.reasons))
+
+    def test_experiment_spec_rejects_generated_vector_inputs(self):
+        result = evaluate_experiment_spec(
+            {
+                "research_question": "Does attention handle long-range dependencies?",
+                "mini_lab_goal": "Compare attention over a randomly initialized sequence of vectors.",
+                "dataset": {
+                    "name": "Indexed PaperLens evidence window",
+                    "source": "Randomly initialized sequence of vectors",
+                },
+                "baseline": "Direct baseline",
+                "metric": "source evidence score",
+                "steps": ["Build random vectors", "Run baseline", "Run variant"],
+                "ablation": "Disable only the attention scorer.",
+                "failure_condition": "source evidence score does not improve.",
+            }
+        )
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("generated vector" in reason for reason in result.reasons))
 
     def test_growth_ideas_need_evidence_and_next_step(self):
         result = evaluate_growth_ideas(
@@ -252,6 +455,24 @@ def run():
             }
         )
         self.assertTrue(result.passed, result.reasons)
+
+    def test_growth_ideas_reject_synthetic_followup_inputs(self):
+        result = evaluate_growth_ideas(
+            {
+                "ideas": [
+                    {
+                        "idea": "Try a synthetic follow-up sequence before the next paper-bound run.",
+                        "source_evidence": ["paper:selected-span", "run:r1"],
+                        "testable_next_step": "Create simulated examples and compare them.",
+                        "risk": "This may not stay tied to the paper evidence.",
+                    }
+                ]
+            },
+            known_evidence_ids={"paper:selected-span", "run:r1"},
+            require_multiple_sources=True,
+        )
+        self.assertFalse(result.passed)
+        self.assertTrue(any("synthetic" in reason for reason in result.reasons))
 
     def test_growth_ideas_require_known_multi_source_evidence(self):
         result = evaluate_growth_ideas(
@@ -302,6 +523,27 @@ def run():
             for idx in range(3)
         ]
         self.assertEqual(fine_tuning_gate(ready)["recommendation"], "maybe")
+
+
+def _source_rows() -> list[dict]:
+    return [
+        {
+            "source_id": "P0.S1",
+            "text": "The selected paper evidence supports the prototype behavior.",
+            "text_hash": "row1",
+            "label": "selected",
+            "gold": True,
+            "query": "selected paper evidence",
+        },
+        {
+            "source_id": "P0.S2",
+            "text": "A contrast source span supports the baseline behavior.",
+            "text_hash": "row2",
+            "label": "context_control",
+            "gold": False,
+            "query": "selected paper evidence",
+        },
+    ]
 
 
 if __name__ == "__main__":

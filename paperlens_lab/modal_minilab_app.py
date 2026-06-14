@@ -19,11 +19,15 @@ def execute_minilab(payload: dict[str, Any]) -> dict[str, Any]:
     from paperlens_lab.scenario_eval import run_starter_code
 
     started = time.time()
-    smoke = run_starter_code(str(payload.get("code", "")))
-    rows = smoke.get("rows") if isinstance(smoke.get("rows"), list) else []
+    execution = run_starter_code(
+        str(payload.get("code", "")),
+        evidence_rows=list(payload.get("evidenceRows") or []),
+        require_evidence_rows=True,
+    )
+    rows = execution.get("rows") if isinstance(execution.get("rows"), list) else []
     return {
         "provider": "modal",
-        "executionMode": "modal-remote-function",
+        "executionMode": "modal-source-bound-remote-function",
         "runner": APP_NAME,
         "paperId": payload.get("paperId", ""),
         "paperTitle": payload.get("paperTitle", ""),
@@ -32,13 +36,17 @@ def execute_minilab(payload: dict[str, Any]) -> dict[str, Any]:
         "selectedSpanHash": payload.get("selectedSpanHash", ""),
         "codeHash": payload.get("codeHash", ""),
         "sourceIndexBound": bool(payload.get("sourceIndexBound")),
-        "passed": bool(smoke.get("passed")),
-        "reasons": list(smoke.get("reasons") or []),
+        "evidenceRowCount": int(payload.get("evidenceRowCount") or 0),
+        "evidenceHash": payload.get("evidenceHash", ""),
+        "passed": bool(execution.get("passed")),
+        "reasons": list(execution.get("reasons") or []),
         "rows": rows,
         "logs": [
             f"modal app={APP_NAME}",
             f"remote code_hash={payload.get('codeHash', '')}",
             f"remote source_hash={payload.get('sourceHash', '')}",
+            f"remote evidence_hash={payload.get('evidenceHash', '')}",
+            f"remote evidence_rows={len(payload.get('evidenceRows') or [])}",
             f"remote rows={len(rows)}",
         ],
         "durationMs": int((time.time() - started) * 1000),

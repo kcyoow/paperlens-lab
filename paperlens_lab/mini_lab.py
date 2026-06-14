@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from .ingest import clean_text
-from .scenario_eval import run_starter_code
-from .source_index import get_span_text, text_hash
+from .scenario_eval import run_starter_code, source_contains_quote
+from .source_index import evidence_window, get_span_text, text_hash
 
 
 DEFAULT_PROVIDER = "local"
@@ -81,9 +81,20 @@ def _build_job_payload(
     if not source_span:
         raise MiniLabError("Selected source span is required.")
     if selected_clean and selected_clean != source_span:
-        raise MiniLabError("Selected span does not match the paper index.")
+        if source_contains_quote(source_span, selected_clean):
+            source_span = selected_clean
+        else:
+            raise MiniLabError("Selected span does not match the paper index.")
 
     selected_hash = text_hash(source_span)
+    evidence_rows = build_evidence_rows(
+        paper_id=paper_id,
+        span_id=span_id,
+        selected_span=source_span,
+    )
+    if not evidence_rows:
+        raise MiniLabError("Mini-lab requires indexed paper evidence rows.", status_code=404)
+    evidence_hash = text_hash(json.dumps(evidence_rows, ensure_ascii=False, sort_keys=True))
     return {
         "code": cleaned_code,
         "paperId": paper_id,
@@ -94,16 +105,23 @@ def _build_job_payload(
         "selectedSpanHash": selected_hash,
         "codeHash": code_hash(cleaned_code),
         "sourceIndexBound": bool(indexed_span),
+        "evidenceRows": evidence_rows,
+        "evidenceRowCount": len(evidence_rows),
+        "evidenceHash": evidence_hash,
         "createdAt": time.time(),
     }
 
 
 def _run_local_mini_lab(job: dict[str, Any]) -> dict[str, Any]:
     started = time.time()
-    smoke = run_starter_code(str(job.get("code", "")))
+    execution = run_starter_code(
+        str(job.get("code", "")),
+        evidence_rows=list(job.get("evidenceRows") or []),
+        require_evidence_rows=True,
+    )
     return {
         "provider": "local",
-        "executionMode": "local-subprocess",
+        "executionMode": "local-source-bound-subprocess",
         "runner": "paperlens-local-minilab",
         "paperId": job.get("paperId", ""),
         "paperTitle": job.get("paperTitle", ""),
@@ -112,12 +130,15 @@ def _run_local_mini_lab(job: dict[str, Any]) -> dict[str, Any]:
         "selectedSpanHash": job.get("selectedSpanHash", ""),
         "codeHash": job.get("codeHash", ""),
         "sourceIndexBound": bool(job.get("sourceIndexBound")),
-        "passed": bool(smoke.get("passed")),
-        "reasons": list(smoke.get("reasons") or []),
-        "rows": smoke.get("rows", []),
+        "evidenceRowCount": int(job.get("evidenceRowCount") or 0),
+        "evidenceHash": job.get("evidenceHash", ""),
+        "passed": bool(execution.get("passed")),
+        "reasons": list(execution.get("reasons") or []),
+        "rows": execution.get("rows", []),
         "logs": [
-            "local mini-lab runner used the same isolated starter subprocess as smoke preflight",
-            f"rows={len(smoke.get('rows') or [])}",
+            "local mini-lab runner executed generated code with indexed paper evidence rows",
+            f"rows={len(execution.get('rows') or [])}",
+            f"evidence_rows={len(job.get('evidenceRows') or [])}",
         ],
         "durationMs": int((time.time() - started) * 1000),
     }
@@ -189,6 +210,7 @@ def _validated_result(
         "sourceHashMatches": result.get("sourceHash") == job.get("sourceHash"),
         "selectedSpanHashMatches": result.get("selectedSpanHash") == job.get("selectedSpanHash"),
         "codeHashMatches": result.get("codeHash") == job.get("codeHash"),
+        "evidenceHashMatches": result.get("evidenceHash") == job.get("evidenceHash"),
         "sourceIndexBound": bool(job.get("sourceIndexBound")),
         "providerMatches": result.get("provider") == requested_provider,
     }
@@ -201,14 +223,54 @@ def _validated_result(
     rows = result.get("rows") if isinstance(result.get("rows"), list) else []
     if not rows:
         reasons.append("mini-lab returned no rows")
-    for index, row in enumerate(rows[:3], start=1):
+    evidence_rows = list(job.get("evidenceRows") or [])
+    evidence_by_id = {
+        str(row.get("source_id") or ""): str(row.get("text_hash") or "")
+        for row in evidence_rows
+        if isinstance(row, dict) and str(row.get("source_id") or "")
+    }
+    selected_ids = {
+        str(row.get("source_id") or "")
+        for row in evidence_rows
+        if isinstance(row, dict) and (str(row.get("label") or "") == "selected" or row.get("gold") is True)
+    }
+    selected_seen = False
+    if evidence_rows and not result.get("evidenceHash"):
+        reasons.append("mini-lab result did not echo the evidence hash")
+    for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             reasons.append(f"mini-lab row {index} is not an object")
             continue
         for key in ("baseline_score", "prototype_score", "metric", "failure_condition"):
             if key not in row:
                 reasons.append(f"mini-lab row {index} missing {key}")
+        if evidence_by_id:
+            source_id = str(row.get("source_id") or "")
+            if not source_id:
+                reasons.append(f"mini-lab row {index} missing source_id")
+            elif source_id not in evidence_by_id:
+                reasons.append(f"mini-lab row {index} source_id is outside indexed paper evidence")
+            else:
+                if source_id in selected_ids:
+                    selected_seen = True
+                row_hash = str(row.get("text_hash") or "")
+                if not row_hash:
+                    reasons.append(f"mini-lab row {index} missing text_hash")
+                elif evidence_by_id[source_id] and row_hash != evidence_by_id[source_id]:
+                    reasons.append(f"mini-lab row {index} text_hash does not match indexed paper evidence")
+    if selected_ids and not selected_seen:
+        reasons.append("mini-lab rows must include the selected paper evidence row")
 
+    claim_comparison = _claim_comparison(rows)
+    if reasons:
+        claim_comparison = {
+            **claim_comparison,
+            "verdict": "inconclusive",
+            "limitations": [
+                *claim_comparison.get("limitations", []),
+                "The mini-lab result did not satisfy evidence-row binding.",
+            ],
+        }
     return {
         "passed": bool(result.get("passed")) and not reasons,
         "reasons": reasons,
@@ -224,8 +286,73 @@ def _validated_result(
         "selectedSpanHash": job.get("selectedSpanHash", ""),
         "codeHash": job.get("codeHash", ""),
         "sourceIndexBound": bool(job.get("sourceIndexBound")),
+        "evidenceRowCount": int(job.get("evidenceRowCount") or 0),
+        "evidenceHash": job.get("evidenceHash", ""),
         "validation": validation,
+        "claimComparison": claim_comparison,
         "durationMs": int(result.get("durationMs") or 0),
+    }
+
+
+def build_evidence_rows(*, paper_id: str, span_id: str, selected_span: str) -> list[dict[str, Any]]:
+    window = evidence_window(paper_id, span_id, radius=4) if paper_id and span_id else None
+    if not window:
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in window.get("spans", []):
+        source_id = str(item.get("span_id") or "")
+        text = clean_text(str(item.get("text") or ""))
+        if not source_id or not text:
+            continue
+        label = "selected" if source_id == span_id else "context_control"
+        rows.append(
+            {
+                "source_id": source_id,
+                "text": text,
+                "text_hash": str(item.get("text_hash") or text_hash(text)),
+                "label": label,
+                "gold": label == "selected",
+                "query": selected_span,
+            }
+        )
+    return rows
+
+
+def _claim_comparison(rows: list[Any]) -> dict[str, Any]:
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    improved = 0
+    failed = 0
+    comparable = 0
+    metrics: list[str] = []
+    for row in valid_rows:
+        baseline = row.get("baseline_score")
+        prototype = row.get("prototype_score")
+        if isinstance(row.get("metric"), str) and row.get("metric"):
+            metrics.append(str(row["metric"]))
+        if isinstance(baseline, (int, float)) and isinstance(prototype, (int, float)):
+            comparable += 1
+            if prototype > baseline:
+                improved += 1
+        if row.get("failure_condition") is True:
+            failed += 1
+    if comparable == 0:
+        verdict = "inconclusive"
+    elif improved > 0 and failed == 0:
+        verdict = "directionally_supports"
+    elif failed > 0:
+        verdict = "mixed_or_not_supported"
+    else:
+        verdict = "inconclusive"
+    return {
+        "verdict": verdict,
+        "improvedRows": improved,
+        "failedRows": failed,
+        "comparableRows": comparable,
+        "metrics": list(dict.fromkeys(metrics)),
+        "limitations": [
+            "This mini-lab compares a source-bound run against the generated baseline.",
+            "A directional result is not a reproduction of the full paper claim.",
+        ],
     }
 
 
@@ -241,6 +368,8 @@ def _failed_modal_result(job: dict[str, Any], reason: str, *, logs: list[str] | 
         "selectedSpanHash": job.get("selectedSpanHash", ""),
         "codeHash": job.get("codeHash", ""),
         "sourceIndexBound": bool(job.get("sourceIndexBound")),
+        "evidenceRowCount": int(job.get("evidenceRowCount") or 0),
+        "evidenceHash": job.get("evidenceHash", ""),
         "passed": False,
         "reasons": [reason],
         "rows": [],

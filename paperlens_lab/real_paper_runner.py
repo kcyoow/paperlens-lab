@@ -6,10 +6,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .analysis import starter_code_from_spec
 from .ingest import PaperSource, build_source
 from .memory_store import append_memory, load_memories, paper_key
-from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, ModelGateway, evidence_map
+from .mini_lab import build_evidence_rows
+from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, TRANSLATION_MODEL, ModelGateway, evidence_map
 from .scenario_eval import (
     EvalResult,
     FailureRecord,
@@ -45,13 +45,13 @@ DEFAULT_REAL_PAPERS = [
         name="retrieval_augmented_generation",
         arxiv="2005.11401",
         question="What is the selected span's concrete method or result, and what evidence would be missing for a broader claim?",
-        idea="Build a tiny retrieval-plus-generation ablation on a hand-built question set.",
+        idea="Build a source-evidence retrieval-plus-generation ablation using indexed spans from this paper.",
     ),
     RealPaperCase(
         name="lora",
         arxiv="2106.09685",
         question="Does this selected span justify fine-tuning, prompting, or only a narrower adapter-style test?",
-        idea="Compare a prompting baseline with a tiny adapter-like memory or parameter-efficient update proxy.",
+        idea="Compare a prompting baseline with an adapter-style source-evidence probe tied to this paper.",
     ),
 ]
 
@@ -80,6 +80,7 @@ def run_real_paper_case(
         use_model=use_model,
         max_translate_spans=max_translate_spans,
         max_reader_spans=max_reader_spans,
+        gateway=gateway,
     )
     spans = _flatten_reader_spans(document)
     selected = _selected_spans(spans)
@@ -128,19 +129,32 @@ def run_real_paper_case(
         locale=locale,
     )
 
+    selected_middle = selected[len(selected) // 2] if selected else {}
+    selected_middle_text = str(selected_middle.get("original") or "")
+    selected_middle_id = str(selected_middle.get("id") or "")
+
     experiment = gateway.experiment_spec(
         paper_title=document["title"],
-        selected_span=selected[len(selected) // 2]["original"] if selected else "",
-        translated_span=translation_by_id.get(selected[len(selected) // 2]["id"], "") if selected else "",
+        selected_span=selected_middle_text,
+        translated_span=translation_by_id.get(selected_middle_id, "") if selected else "",
         source_text=source.text,
         idea=case.idea,
         locale=locale,
         use_model=use_model,
     )
-    starter_code = starter_code_from_spec(
-        document["title"],
-        experiment.data,
-        selected_span=selected[len(selected) // 2]["original"] if selected else "",
+    starter = gateway.starter_code(
+        paper_title=document["title"],
+        selected_span=selected_middle_text,
+        source_text=source.text,
+        experiment_spec=experiment.data if isinstance(experiment.data, dict) else {},
+        locale=locale,
+        use_model=use_model,
+    )
+    starter_code = str(starter.data.get("code") or starter.text or "")
+    starter_evidence_rows = build_evidence_rows(
+        paper_id=document["id"],
+        span_id=selected_middle_id,
+        selected_span=selected_middle_text,
     )
 
     append_memory(
@@ -201,6 +215,7 @@ def run_real_paper_case(
             qa_runs,
             experiment.data,
             starter_code,
+            starter_evidence_rows,
             growth.data,
             memories,
             litm_probe,
@@ -209,8 +224,28 @@ def run_real_paper_case(
         ),
     ]
     if use_model:
-        evals.append(evaluate_model_backing(translations, qa_runs, experiment, growth, litm_probe, growth_iteration))
-    failures = _failure_records(case.name, evals, qa_runs, experiment, growth)
+        evals.append(
+            evaluate_model_backing(
+                translations,
+                qa_runs,
+                experiment,
+                starter,
+                growth,
+                litm_probe,
+                growth_iteration,
+            )
+        )
+    failures = _failure_records(
+        case.name,
+        evals,
+        translations,
+        qa_runs,
+        experiment,
+        starter,
+        growth,
+        litm_probe,
+        growth_iteration,
+    )
     result = {
         "case": asdict(case),
         "passed": all(item.passed for item in evals),
@@ -240,12 +275,13 @@ def run_real_paper_case(
         },
         "evaluations": [asdict(item) for item in evals],
         "fine_tuning": fine_tuning_gate(failures) if use_model else _no_model_fine_tuning_decision(),
+        "failure_records": [asdict(item) for item in failures],
         "model_outputs": {
             "translation": _public_result(translations),
             "qa": qa_runs,
             "adversarial_litm": litm_probe,
             "experiment": _public_result(experiment),
-            "starter_code": {"task": "starter_code", "code": starter_code},
+            "starter_code": _public_result(starter),
             "growth": _public_result(growth),
             "growth_iteration": _public_result(growth_iteration),
         },
@@ -286,17 +322,17 @@ def run_real_papers(
     ]
     failures = [
         FailureRecord(
-            task=evaluation["name"],
-            label=reason,
-            scenario_id=run["case"]["name"],
-            model=run["model_outputs"]["translation"]["model"],
-            severity="high",
-            root_cause=_root_cause(reason),
-            fix_attempted=True,
+            task=str(record.get("task", "unknown")),
+            label=str(record.get("label", "")),
+            scenario_id=str(record.get("scenario_id", run["case"]["name"])),
+            model=str(record.get("model", "unknown")),
+            severity=str(record.get("severity", "medium")),
+            root_cause=str(record.get("root_cause", "unknown")),
+            fix_attempted=bool(record.get("fix_attempted")),
         )
         for run in runs
-        for evaluation in run["evaluations"]
-        for reason in evaluation["reasons"]
+        for record in run.get("failure_records", [])
+        if isinstance(record, dict)
     ]
     summary = {
         "passed": all(run["passed"] for run in runs),
@@ -612,6 +648,7 @@ def _evaluate_run(
     qa_runs: list[dict[str, Any]],
     experiment_data: dict[str, Any],
     starter_code: str,
+    starter_evidence_rows: list[dict[str, Any]],
     growth_data: dict[str, Any],
     memories: list[dict[str, Any]],
     litm_probe: dict[str, Any] | None = None,
@@ -641,7 +678,13 @@ def _evaluate_run(
     if litm_probe:
         evals.append(evaluate_lost_in_the_middle(litm_probe))
     evals.append(evaluate_experiment_spec(experiment_data))
-    evals.append(evaluate_starter_code(starter_code))
+    evals.append(
+        evaluate_starter_code(
+            starter_code,
+            evidence_rows=starter_evidence_rows,
+            require_evidence_rows=True,
+        )
+    )
     known_ids = {item.get("id", "") for item in memories}
     known_ids.update({"paper:selected-middle", "run:r1"})
     evals.append(evaluate_growth_ideas(growth_data, known_evidence_ids=known_ids, require_multiple_sources=True))
@@ -772,6 +815,7 @@ def evaluate_model_backing(
     translation: Any,
     qa_runs: list[dict[str, Any]],
     experiment: Any,
+    starter: Any,
     growth: Any,
     litm_probe: dict[str, Any] | None = None,
     growth_iteration: Any | None = None,
@@ -784,6 +828,8 @@ def evaluate_model_backing(
             reasons.append(f"qa {run['span']['id']} used fallback")
     if experiment.used_fallback:
         reasons.append("experiment used fallback")
+    if starter.used_fallback:
+        reasons.append("starter code used fallback")
     if growth.used_fallback:
         reasons.append("growth used fallback")
     if litm_probe and (litm_probe.get("result") or {}).get("used_fallback"):
@@ -796,20 +842,42 @@ def evaluate_model_backing(
 def _failure_records(
     scenario_id: str,
     evals: list[EvalResult],
+    translation: Any,
     qa_runs: list[dict[str, Any]],
     experiment: Any,
+    starter: Any,
     growth: Any,
+    litm_probe: dict[str, Any] | None = None,
+    growth_iteration: Any | None = None,
 ) -> list[FailureRecord]:
-    model = experiment.model or growth.model or "unknown"
+    qa_model = next((str(run["result"].get("model", "")) for run in qa_runs if run.get("result")), "") or "unknown"
+    adversarial_model = (
+        str(((litm_probe or {}).get("result") or {}).get("model", "")) if litm_probe else ""
+    ) or qa_model
+    model_by_eval = {
+        "pdf_parse_and_reader_spans": experiment.model or starter.model or "unknown",
+        "translation_fidelity": translation.model or "unknown",
+        "grounded_qa": qa_model,
+        "middle_selected_span_grounding": qa_model,
+        "adversarial_lost_in_the_middle": adversarial_model,
+        "experiment_spec": experiment.model or "unknown",
+        "starter_code_source_run": starter.model or "unknown",
+        "growth_ideas": growth.model or "unknown",
+        "research_growth_iteration": (
+            (growth_iteration.model if growth_iteration is not None else "") or growth.model or "unknown"
+        ),
+    }
     records: list[FailureRecord] = []
     for item in evals:
+        if item.name == "model_backing":
+            continue
         for reason in item.reasons:
             records.append(
                 FailureRecord(
                     task=item.name,
                     label=reason,
                     scenario_id=scenario_id,
-                    model=model,
+                    model=model_by_eval.get(item.name, experiment.model or growth.model or "unknown"),
                     severity=(
                         "high"
                         if item.name in {"grounded_qa", "middle_selected_span_grounding", "adversarial_lost_in_the_middle"}
@@ -819,12 +887,24 @@ def _failure_records(
                     fix_attempted=True,
                 )
             )
+    if translation.used_fallback:
+        records.append(
+            FailureRecord(
+                task="translation",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=translation.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
     for run in qa_runs:
         if run["result"].get("used_fallback"):
             records.append(
                 FailureRecord(
                     task="grounded_qa",
-                    label=f"{run['span']['id']} used fallback",
+                    label="used fallback",
                     scenario_id=scenario_id,
                     model=run["result"].get("model", "unknown"),
                     severity="medium",
@@ -832,6 +912,66 @@ def _failure_records(
                     fix_attempted=True,
                 )
             )
+    if experiment.used_fallback:
+        records.append(
+            FailureRecord(
+                task="experiment_spec",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=experiment.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if starter.used_fallback:
+        records.append(
+            FailureRecord(
+                task="starter_code",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=starter.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if growth.used_fallback:
+        records.append(
+            FailureRecord(
+                task="research_growth",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=growth.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if litm_probe and (litm_probe.get("result") or {}).get("used_fallback"):
+        records.append(
+            FailureRecord(
+                task="adversarial_grounded_qa",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=adversarial_model,
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if growth_iteration is not None and growth_iteration.used_fallback:
+        records.append(
+            FailureRecord(
+                task="research_growth_iteration",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=growth_iteration.model or growth.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
     return records
 
 
@@ -895,6 +1035,7 @@ def main() -> None:
     parser.add_argument("--provider", default=None, help="Override PAPERLENS_PROVIDER.")
     parser.add_argument("--model", default=None, help="Override PAPERLENS_MODEL.")
     parser.add_argument("--quality-model", default=None, help="Override PAPERLENS_QUALITY_MODEL.")
+    parser.add_argument("--translation-model", default=None, help="Override PAPERLENS_TRANSLATION_MODEL.")
     parser.add_argument("--max-pdf-pages", type=int, default=8)
     parser.add_argument("--max-translate-spans", type=int, default=12)
     parser.add_argument("--max-reader-spans", type=int, default=180)
@@ -906,6 +1047,7 @@ def main() -> None:
         provider=args.provider or DEFAULT_PROVIDER,
         model_id=args.model or DEFAULT_MODEL,
         quality_model_id=args.quality_model or QUALITY_MODEL,
+        translation_model_id=args.translation_model or args.model or TRANSLATION_MODEL,
     )
     cases = [_case_by_name_or_arxiv(item) for item in args.paper] if args.paper else DEFAULT_REAL_PAPERS
     result = run_real_papers(

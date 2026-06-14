@@ -1,9 +1,10 @@
 "use client";
 
 import { Dispatch, SetStateAction, useEffect, useState } from "react";
-import { askAboutSpan } from "@/lib/api";
+import { askAboutPaper, askAboutSpan } from "@/lib/api";
 import { Span, QAMessage, ViewMode } from "@/lib/types";
 import { Locale, UI_TEXT } from "@/lib/i18n";
+import { displayTranslationText } from "@/lib/translation";
 
 interface Props {
   paperId: string;
@@ -17,6 +18,8 @@ interface Props {
   locale: Locale;
   paperTitle: string;
   sourceText: string;
+  onRetranslate: (() => void) | null;
+  isRetranslating: boolean;
 }
 
 export default function RightPanel({
@@ -31,33 +34,42 @@ export default function RightPanel({
   locale,
   paperTitle,
   sourceText,
+  onRetranslate,
+  isRetranslating,
 }: Props) {
   const [qaInput, setQaInput] = useState("");
   const span = selectedSpanId ? findSpan(selectedSpanId) : null;
   const text = UI_TEXT[locale].rightPanel;
 
   const [tab, setTab] = useState<"source" | "qa">("source");
+  const [qaScope, setQaScope] = useState<"span" | "paper">("paper");
+  const activeQaScope = span && qaScope === "span" ? "span" : "paper";
 
   useEffect(() => {
     if (showQA) setTab("qa");
   }, [showQA]);
 
+  useEffect(() => {
+    setQaScope(span ? "span" : "paper");
+  }, [selectedSpanId, span?.original]);
+
   async function handleSendQuestion() {
-    if (!qaInput.trim() || !selectedSpanId || !span) return;
+    if (!qaInput.trim()) return;
 
     const question = qaInput;
+    const asksSelectedSpan = activeQaScope === "span" && Boolean(span && selectedSpanId);
     const userMsg: QAMessage = {
       id: `qa-${Date.now()}`,
       role: "user",
       content: question,
-      supportSpanIds: [selectedSpanId],
+      supportSpanIds: asksSelectedSpan && selectedSpanId ? [selectedSpanId] : undefined,
     };
 
     const pendingMsg: QAMessage = {
       id: `qa-${Date.now() + 1}`,
       role: "assistant",
       content: locale === "ko" ? "백엔드에서 근거를 확인하는 중..." : "Checking backend evidence...",
-      supportSpanIds: [selectedSpanId],
+      supportSpanIds: asksSelectedSpan && selectedSpanId ? [selectedSpanId] : undefined,
       isLoading: true,
     };
 
@@ -67,14 +79,23 @@ export default function RightPanel({
     setTab("qa");
 
     try {
-      const answer = await askAboutSpan({
-        paperId,
-        span,
-        paperTitle,
-        sourceText,
-        question,
-        locale,
-      });
+      const answer =
+        asksSelectedSpan && selectedSpanId && span
+          ? await askAboutSpan({
+              paperId,
+              span,
+              paperTitle,
+              sourceText,
+              question,
+              locale,
+            })
+          : await askAboutPaper({
+              paperId,
+              paperTitle,
+              sourceText,
+              question,
+              locale,
+            });
       setQaMessages((messages) =>
         messages.map((message) => (message.id === pendingMsg.id ? answer : message)),
       );
@@ -150,17 +171,19 @@ export default function RightPanel({
                   {text.koreanTranslation}
                 </p>
                 <p className="text-sm leading-relaxed text-text-primary">
-                  {span.translated}
+                  {displayTranslationText(span.original, span.translated, locale, span.translationStatus)}
                 </p>
               </div>
 
               {/* Actions */}
               <div className="mt-4 flex gap-2">
-                <button className="rounded-lg border border-border px-3 py-1.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-hover">
-                  {text.reportTranslation}
-                </button>
-                <button className="rounded-lg border border-border px-3 py-1.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-hover">
-                  {text.retranslate}
+                <button
+                  type="button"
+                  onClick={() => onRetranslate?.()}
+                  disabled={!onRetranslate || isRetranslating}
+                  className="rounded-lg border border-border px-3 py-1.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isRetranslating ? text.retranslating : text.retranslate}
                 </button>
               </div>
             </div>
@@ -194,28 +217,84 @@ export default function RightPanel({
       {tab === "qa" && (
         <>
           <div className="flex-1 overflow-y-auto p-4">
-            {qaMessages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 text-center">
-                <svg
-                  className="mb-3 text-text-muted"
-                  width="32"
-                  height="32"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-                <p className="mb-1 text-xs text-text-muted">
-                  {text.qaEmptyTitle}
-                </p>
-                <p className="text-[11px] text-text-muted">
-                  {text.qaEmptyHint}
-                </p>
+            {span && (
+              <div className="mb-3 grid grid-cols-2 rounded-lg bg-surface-secondary p-1">
+                {(
+                  [
+                    ["span", text.qaScopeSelected],
+                    ["paper", text.qaScopePaper],
+                  ] as const
+                ).map(([scope, label]) => (
+                  <button
+                    key={scope}
+                    type="button"
+                    onClick={() => setQaScope(scope)}
+                    className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                      activeQaScope === scope
+                        ? "bg-surface text-text-primary shadow-sm"
+                        : "text-text-secondary hover:text-text-primary"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
+            )}
+            {qaMessages.length === 0 ? (
+              span && activeQaScope === "span" ? (
+                <div className="space-y-4 animate-fade-in">
+                  <div className="rounded-xl border border-primary-200 bg-primary-50/50 p-3">
+                    <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-primary-700">
+                      {text.selectedSentence}
+                    </p>
+                    <span className="mb-3 inline-block rounded bg-white px-1.5 py-0.5 text-[10px] font-mono text-primary-700">
+                      {selectedSpanId}
+                    </span>
+                    <p className="mb-3 text-sm leading-relaxed text-text-primary">
+                      {span.original}
+                    </p>
+                    <div className="rounded-lg border border-white/80 bg-white/70 p-3">
+                      <p className="mb-1 text-[10px] font-semibold text-text-muted">
+                        {text.koreanTranslation}
+                      </p>
+                      <p className="text-sm leading-relaxed text-text-primary">
+                        {displayTranslationText(span.original, span.translated, locale, span.translationStatus)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border bg-surface-secondary p-3">
+                    <p className="mb-1 text-xs font-medium text-text-primary">
+                      {text.qaReadyTitle}
+                    </p>
+                    <p className="text-[11px] leading-relaxed text-text-muted">
+                      {text.qaEmptyHint}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <svg
+                    className="mb-3 text-text-muted"
+                    width="32"
+                    height="32"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <p className="mb-1 text-xs text-text-muted">
+                    {text.paperScopeTitle}
+                  </p>
+                  <p className="text-[11px] text-text-muted">
+                    {text.paperScopeHint}
+                  </p>
+                </div>
+              )
             ) : (
               <div className="space-y-3">
                 {qaMessages.map((msg) => (
@@ -230,7 +309,21 @@ export default function RightPanel({
                     <p className="mb-1 text-[10px] font-semibold text-text-muted">
                       {msg.role === "user" ? text.me : "AI"}
                     </p>
+                    {msg.role === "assistant" && (msg.usedFallback || msg.error) && (
+                      <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] leading-4 text-amber-900">
+                        {locale === "ko"
+                          ? "이 답변은 논문 근거 검증을 완전히 통과하지 못했습니다."
+                          : "This answer was not fully confirmed against the paper evidence."}
+                        {msg.error ? ` ${msg.error}` : ""}
+                      </div>
+                    )}
                     <p className="text-sm leading-relaxed">{msg.content}</p>
+                    {msg.role === "assistant" && !msg.usedFallback && !msg.error && msg.confidence && (
+                      <p className="mt-1 text-[10px] text-text-muted">
+                        {locale === "ko" ? "신뢰도" : "confidence"}: {msg.confidence}
+                        {msg.needsMoreContext ? locale === "ko" ? " · 추가 근거 필요" : " · more context needed" : ""}
+                      </p>
+                    )}
                     {msg.supportSpanIds && msg.supportSpanIds.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {msg.supportSpanIds.map((id) => (
@@ -241,42 +334,6 @@ export default function RightPanel({
                             {id}
                           </span>
                         ))}
-                      </div>
-                    )}
-                    {msg.role === "assistant" && (msg.provider || msg.usedFallback || msg.error) && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {msg.confidence && (
-                          <span className="rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] text-text-muted">
-                            {msg.confidence}
-                          </span>
-                        )}
-                        {msg.provider && (
-                          <span className="rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] text-text-muted">
-                            {msg.provider}
-                          </span>
-                        )}
-                        {msg.usedFallback && (
-                          <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] text-yellow-700">
-                            fallback
-                          </span>
-                        )}
-                        {msg.error && (
-                          <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] text-red-700">
-                            check output
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {msg.role === "assistant" && msg.evidenceWindow && (
-                      <div className="mt-2 rounded border border-border bg-surface-secondary px-2 py-1.5 text-[10px] leading-relaxed text-text-muted">
-                        <p>
-                          {locale === "ko" ? "근거 범위" : "Evidence window"}:{" "}
-                          <span className="font-mono">{msg.evidenceWindow.spanRange}</span>
-                        </p>
-                        <p>
-                          {locale === "ko" ? "원문 해시" : "Source hash"}:{" "}
-                          <span className="font-mono">{msg.evidenceWindow.sourceHash}</span>
-                        </p>
                       </div>
                     )}
                     {msg.role === "assistant" && msg.evidence && msg.evidence.length > 0 && (
@@ -304,16 +361,15 @@ export default function RightPanel({
                 onChange={(e) => setQaInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSendQuestion()}
                 placeholder={
-                  span
+                  activeQaScope === "span" && span
                     ? text.askPlaceholder
-                    : text.selectFirstPlaceholder
+                    : text.askPaperPlaceholder || text.selectFirstPlaceholder
                 }
-                disabled={!span}
                 className="flex-1 rounded-lg border border-border bg-surface-secondary px-3 py-2 text-xs outline-none transition-colors placeholder:text-text-muted focus:border-primary-400 disabled:opacity-50"
               />
               <button
                 onClick={handleSendQuestion}
-                disabled={!span || !qaInput.trim()}
+                disabled={!qaInput.trim()}
                 className="rounded-lg bg-primary-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-primary-700 disabled:opacity-50"
               >
                 <svg

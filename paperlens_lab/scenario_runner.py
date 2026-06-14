@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, ModelGateway
+from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, TRANSLATION_MODEL, ModelGateway
 from .scenario_eval import (
     EvalResult,
     evaluate_experiment_spec,
@@ -44,11 +44,11 @@ def default_scenarios() -> list[PaperScenario]:
                 "The method improves top-5 precision by 3.2 points over a relevance-only baseline on 128 queries."
             ),
             question="이 결과가 정확히 무엇을 비교한 거야?",
-            idea="Try a tiny evidence-linked reranking ablation.",
+            idea="Try a source-evidence reranking ablation tied to these spans.",
         ),
         PaperScenario(
             name="adapter_ablation",
-            title="Tiny Adapter Ablations for Code Repair",
+            title="Adapter Ablations for Code Repair",
             source_text=(
                 "We train a 4B parameter repair model with rank-8 LoRA adapters on 640 curated bug-fix pairs. "
                 "The adapter improves pass@1 by 8.5% compared with prompting the base model. "
@@ -72,7 +72,7 @@ def default_scenarios() -> list[PaperScenario]:
                 "A glossary-constrained decoder reduces terminology drift from 17% to 6% in a 50-paper study."
             ),
             question="용어 보존이 왜 중요한 거야?",
-            idea="Build a glossary-preservation smoke test for translated paper spans.",
+            idea="Build a glossary-preservation source run for translated paper spans.",
         ),
     ]
 
@@ -140,7 +140,14 @@ def run_scenario(
             require_multiple_sources=True,
         ),
     ]
-    failures = _failure_labels(evals)
+    if use_model:
+        evals.append(_model_backing_eval(gateway, {
+            "translation": translation,
+            "qa": qa,
+            "experiment": experiment,
+            "growth": growth,
+        }))
+    failures = _failure_labels(evals, include_model_backing=False)
     return {
         "scenario": asdict(scenario),
         "passed": all(result.passed for result in evals),
@@ -167,6 +174,7 @@ def run_scenarios(
         reason
         for run in runs
         for result in run["evaluations"]
+        if result["name"] != "model_backing"
         for reason in result["reasons"]
         if not result["passed"]
     ]
@@ -184,6 +192,7 @@ def main() -> None:
     parser.add_argument("--provider", default=None, help="Override PAPERLENS_PROVIDER for this run.")
     parser.add_argument("--model", default=None, help="Override PAPERLENS_MODEL for this run.")
     parser.add_argument("--quality-model", default=None, help="Override PAPERLENS_QUALITY_MODEL for this run.")
+    parser.add_argument("--translation-model", default=None, help="Override PAPERLENS_TRANSLATION_MODEL for this run.")
     parser.add_argument("--compact", action="store_true", help="Print only scenario pass/fail summary.")
     args = parser.parse_args()
 
@@ -191,6 +200,7 @@ def main() -> None:
         provider=args.provider or DEFAULT_PROVIDER,
         model_id=args.model or DEFAULT_MODEL,
         quality_model_id=args.quality_model or QUALITY_MODEL,
+        translation_model_id=args.translation_model or args.model or TRANSLATION_MODEL,
     )
     result = run_scenarios(gateway=gateway, use_model=args.use_model)
     if args.compact:
@@ -220,12 +230,39 @@ def _first_translation(data: dict[str, Any]) -> str:
     return ""
 
 
-def _failure_labels(evals: list[EvalResult]) -> list[str]:
+def _failure_labels(evals: list[EvalResult], *, include_model_backing: bool = True) -> list[str]:
     labels: list[str] = []
     for result in evals:
+        if result.name == "model_backing" and not include_model_backing:
+            continue
         if not result.passed:
             labels.extend(result.reasons or [result.name])
     return labels
+
+
+def _model_backing_eval(gateway: ModelGateway, outputs: dict[str, Any]) -> EvalResult:
+    reasons: list[str] = []
+    expected_models = {
+        "translation": gateway.translation_model_id,
+        "qa": gateway.model_id,
+        "experiment": gateway.model_id,
+        "growth": gateway.quality_model_id,
+    }
+    for label, result in outputs.items():
+        expected_model = expected_models.get(label, gateway.model_id)
+        if result.used_fallback:
+            reasons.append(f"{label} used fallback")
+        if result.provider in {"", "fallback"}:
+            reasons.append(f"{label} is not provider-backed")
+        if not result.model or str(result.model).startswith("fallback"):
+            reasons.append(f"{label} is not model-backed")
+        if expected_model and result.model != expected_model:
+            reasons.append(f"{label} model mismatch: expected {expected_model}, saw {result.model}")
+        if not result.trace_id:
+            reasons.append(f"{label} trace id is missing")
+        if result.error:
+            reasons.append(f"{label} returned error: {result.error}")
+    return EvalResult("model_backing", not reasons, reasons)
 
 
 def _public_result(result: Any) -> dict[str, Any]:

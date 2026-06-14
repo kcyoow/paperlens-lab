@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from paperlens_lab.model_adapter import ModelGateway
-from paperlens_lab.scenario_eval import evaluate_experiment_spec
+from paperlens_lab.scenario_eval import evaluate_experiment_spec, evaluate_starter_code, run_starter_code
 
 
 class ModelGatewayTests(unittest.TestCase):
@@ -17,6 +17,86 @@ class ModelGatewayTests(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("PAPERLENS_TRACE_PATH", None)
         self.tempdir.cleanup()
+
+    def source_bound_starter_code(self, *, import_json: bool = False, bad_failure_flag: bool = False) -> str:
+        prefix = "import json\n\n" if import_json else ""
+        maybe_json_wrap = "json.loads(json.dumps(payload))" if import_json else "payload"
+        failure_expr = "False" if bad_failure_flag else "prototype_score <= baseline_score"
+        return (
+            prefix
+            + f'''
+# Source-bound mechanisms: attention, recurrence, compact evidence reranker, top five precision.
+def baseline(example):
+    if not example.get("gold"):
+        return {{"prediction": "recurrence", "mode": "local"}}
+    return {{"prediction": "recurrence", "mode": "local"}}
+
+def paper_inspired(example):
+    if example.get("gold"):
+        return {{"prediction": "attention", "mode": "global"}}
+    return {{"prediction": "recurrence", "mode": "control"}}
+
+def score(output, gold):
+    return 1.0 if output["prediction"] == gold else 0.0
+
+def run(evidence_rows=None):
+    rows = []
+    for example in evidence_rows or []:
+        gold = "attention" if example.get("gold") else "recurrence"
+        baseline_score = score(baseline(example), gold)
+        prototype_score = score(paper_inspired(example), gold)
+        payload = {{
+            "source_id": example["source_id"],
+            "text_hash": example["text_hash"],
+            "baseline_score": baseline_score,
+            "prototype_score": prototype_score,
+            "metric": "source evidence accuracy",
+            "mode": "global" if example.get("gold") else "control",
+            "failure_condition": {failure_expr},
+            "failure_rule": "prototype_score <= baseline_score",
+        }}
+        rows.append({maybe_json_wrap})
+    return rows
+'''.strip()
+        )
+
+    def lora_source_bound_starter_code(self) -> str:
+        return '''
+# Source-bound mechanisms: LoRA, low-rank adapters, implementation metadata, PyTorch integration.
+def baseline(example):
+    context = (example.get("text") or example.get("context") or "").lower()
+    if "baseline" in context:
+        return {"prediction": "direct", "mode": "baseline"}
+    return {"prediction": "direct", "mode": "local"}
+
+def paper_inspired(example):
+    context = (example.get("text") or example.get("context") or "").lower()
+    if "lora" in context or "low-rank" in context or "adapter" in context:
+        return {"prediction": "lora_adapter", "mode": "source_bound_adapter"}
+    return {"prediction": "direct", "mode": "control"}
+
+def score(output, gold):
+    return 1.0 if output["prediction"] == gold else 0.0
+
+def run(evidence_rows=None):
+    rows = []
+    for example in evidence_rows or []:
+        text = (example.get("text") or "").lower()
+        gold = "lora_adapter" if ("lora" in text or "low-rank" in text or "adapter" in text) else "direct"
+        baseline_score = score(baseline(example), gold)
+        prototype_score = score(paper_inspired(example), gold)
+        rows.append({
+            "source_id": example["source_id"],
+            "text_hash": example["text_hash"],
+            "baseline_score": baseline_score,
+            "prototype_score": prototype_score,
+            "metric": "source evidence accuracy",
+            "mode": paper_inspired(example)["mode"],
+            "failure_condition": prototype_score <= baseline_score,
+            "failure_rule": "prototype_score <= baseline_score",
+        })
+    return rows
+'''.strip()
 
     def fake_call(self, prompt: str, model_id: str, max_new_tokens: int):
         if '"translations"' in prompt:
@@ -56,16 +136,16 @@ class ModelGatewayTests(unittest.TestCase):
         if '"research_question"' in prompt:
             return json.dumps(
                 {
-                    "research_question": "Does evidence reranking improve top-k precision?",
-                    "mini_lab_goal": "Compare baseline retrieval with evidence reranking.",
-                    "dataset": {"name": "Toy QA set", "fallback": "10 hand-built examples"},
+                    "research_question": "Does evidence reranking improve top-5 precision on indexed paper evidence?",
+                    "mini_lab_goal": "Compare baseline retrieval with evidence reranking on source-index rows.",
+                    "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
                     "baseline": "BM25 only",
-                    "metric": "top-5 precision",
-                    "steps": ["Build toy set", "Run baseline", "Run variant", "Compare failures"],
+                    "metric": "top-5 precision on indexed paper evidence",
+                    "steps": ["Load indexed evidence rows", "Run baseline", "Run variant", "Compare failures"],
                     "ablation": "Remove evidence score",
-                    "failure_condition": "top-5 precision does not improve",
+                    "failure_condition": "top-5 precision on indexed paper evidence does not improve",
                     "expected_result": "Variant may improve precision on evidence-heavy examples.",
-                    "faithfulness_notes": ["Toy run is not paper reproduction."],
+                    "faithfulness_notes": ["Source-bound run is not full paper reproduction."],
                     "starter_code_plan": ["baseline", "variant", "score"],
                     "support_span_ids": ["P0.S1"],
                 }
@@ -169,13 +249,326 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertIn("answer", result.data)
         self.assertIn("P0.S1", result.data["evidence"][0]["source_id"])
 
-    def test_experiment_spec_heavy_model_plan_is_reduced_to_smoke_test(self):
+    def test_translation_uses_repair_before_fallback(self):
+        calls: list[str] = []
+
+        def repairing_translation_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if "repairing a PaperLens Lab translation response" in prompt:
+                return json.dumps(
+                    {
+                        "translations": [
+                            {
+                                "span_id": "P0.S1",
+                                "translation": "우리는 attention mechanisms만 사용하는 Transformer를 제안한다.",
+                                "preserved_terms": ["attention mechanisms", "Transformer"],
+                                "uncertain_phrases": [],
+                            }
+                        ],
+                        "notes": [],
+                    }
+                )
+            return "P0.S1: 우리는 attention mechanisms만 사용하는 Transformer를 제안한다."
+
+        gateway = ModelGateway(provider="hf", call_model=repairing_translation_call)
+        result = gateway.translate_spans(
+            "Attention Is All You Need",
+            [
+                {
+                    "span_id": "P0.S1",
+                    "text": "We propose the Transformer based solely on attention mechanisms.",
+                }
+            ],
+            locale="ko",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.data["translations"][0]["span_id"], "P0.S1")
+        self.assertIn("Transformer", result.data["translations"][0]["translation"])
+
+    def test_starter_code_uses_repair_before_fallback(self):
+        calls: list[str] = []
+
+        def repairing_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if "repairing a PaperLens Lab starter-code JSON response" in prompt:
+                return json.dumps(
+                    {
+                        "code": self.source_bound_starter_code(),
+                        "why_this_matches_span": "The repaired code contrasts attention against removed recurrence and convolutions.",
+                        "limitations": ["Source-bound run is not a full paper reproduction."],
+                    }
+                )
+            return json.dumps(
+                {
+                    "code": "def baseline(example):\n    return {}\n",
+                    "why_this_matches_span": "First pass is still too generic.",
+                    "limitations": ["Missing explicit contrast modes."],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=repairing_call)
+        result = gateway.starter_code(
+            "Attention Is All You Need",
+            "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. A recurrence baseline remains as a contrast source span.",
+            "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. A recurrence baseline remains as a contrast source span.",
+            {
+                "research_question": "Can an attention-style global scorer recover the selected claim better than a local baseline?",
+                "mini_lab_goal": "Compare a local baseline against an attention-style scorer on indexed paper evidence.",
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "selected span plus contrast spans"},
+                "baseline": "Local or first-match heuristic without the attention-style bonus.",
+                "metric": "label accuracy on indexed paper evidence",
+                "ablation": "Remove only the attention-style global scoring bonus and keep everything else fixed.",
+                "failure_condition": "The mini-lab fails if label accuracy on indexed paper evidence does not improve.",
+                "expected_result": "A small directional gain on long-range or distractor-heavy examples.",
+            },
+            "ko",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIsNone(result.error)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertIn('"mode": "global"', result.data["code"])
+
+    def test_starter_code_salvages_fenced_python_without_json_wrapper(self):
+        raw_code = f"""
+The code block below stays grounded to the selected mechanism.
+
+```python
+{self.source_bound_starter_code()}
+```
+""".strip()
+
+        gateway = ModelGateway(provider="hf", call_model=lambda *_: raw_code)
+        result = gateway.starter_code(
+            "Attention Is All You Need",
+            "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. A recurrence baseline remains as a contrast source span.",
+            "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. A recurrence baseline remains as a contrast source span.",
+            {
+                "research_question": "Can an attention-style global scorer recover the selected claim better than a local baseline?",
+                "mini_lab_goal": "Compare a local baseline against an attention-style scorer on indexed paper evidence.",
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "selected span plus contrast spans"},
+                "baseline": "Local or first-match heuristic without the attention-style bonus.",
+                "metric": "label accuracy on indexed paper evidence",
+                "ablation": "Remove only the attention-style global scoring bonus and keep everything else fixed.",
+                "failure_condition": "The mini-lab fails if label accuracy on indexed paper evidence does not improve.",
+                "expected_result": "A small directional gain on long-range or distractor-heavy examples.",
+            },
+            "ko",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIsNone(result.error)
+        self.assertIn('def paper_inspired(example):', result.data["code"])
+        self.assertTrue(result.data["recovered_from_non_json"])
+
+    def test_starter_code_adds_missing_safe_import_before_fallback(self):
+        code = self.source_bound_starter_code(import_json=True).replace("import json\n\n", "", 1)
+        gateway = ModelGateway(
+            provider="hf",
+            call_model=lambda *_: json.dumps(
+                {
+                    "code": code,
+                    "why_this_matches_span": "Uses the compact evidence reranker span as the mechanism.",
+                    "limitations": ["Source-bound run is not full paper reproduction."],
+                }
+            ),
+        )
+
+        result = gateway.starter_code(
+            "Demo Paper",
+            "compact evidence reranker improves top five precision",
+            "The compact evidence reranker improves top five precision in indexed source evidence. A direct retrieval baseline remains as a contrast source span.",
+            {
+                "research_question": "Does compact evidence reranking improve top five precision?",
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                "metric": "Top-5 Precision",
+            },
+            "en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIsNone(result.error)
+        self.assertTrue(result.data["code"].startswith("import json"))
+
+    def test_starter_code_prompt_includes_read_only_repo_manifest_context(self):
+        prompts: list[str] = []
+
+        def repo_manifest_call(prompt, model_id, max_new_tokens):
+            prompts.append(prompt)
+            return json.dumps(
+                {
+                    "code": self.lora_source_bound_starter_code(),
+                    "why_this_matches_span": (
+                        "Uses the source-listed LoRA repository metadata only as read-only context while "
+                        "running on indexed paper evidence rows."
+                    ),
+                    "limitations": ["Does not execute repository code or reproduce full LoRA training."],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=repo_manifest_call)
+        result = gateway.starter_code(
+            "LoRA: Low-Rank Adaptation of Large Language Models",
+            "We release a package that facilitates the integration of LoRA with PyTorch models.",
+            (
+                "We release a package that facilitates the integration of LoRA with PyTorch models. "
+                "See https://github.com/microsoft/LoRA for the official implementation."
+            ),
+            {
+                "research_question": "Can source-listed LoRA implementation metadata guide a source-bound evidence run?",
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                "metric": "source evidence accuracy",
+                "implementation_repositories": [
+                    {
+                        "url": "https://github.com/microsoft/LoRA",
+                        "source_url": "https://github.com/microsoft/LoRA",
+                    }
+                ],
+            },
+            "en",
+            implementation_repo_manifests=[
+                {
+                    "source_id": "implementation:github:1",
+                    "url": "https://github.com/microsoft/LoRA",
+                    "source_url": "https://github.com/microsoft/LoRA",
+                    "status": "inspected",
+                    "execution": "none",
+                    "commit": "c4593f060e6a368d7bb5af5273b8e42810cdef90",
+                    "default_branch": "main",
+                    "file_count": 12,
+                    "truncated": True,
+                    "files": [{"path": "loralib/layers.py", "kind": "source"}],
+                    "readme": {"path": "README.md", "excerpt": "LoRA implementation."},
+                    "license": {"path": "LICENSE.md", "excerpt": "MIT"},
+                    "error": "",
+                }
+            ],
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIsNone(result.error)
+        self.assertIn("https://github.com/microsoft/LoRA", prompts[0])
+        self.assertIn("c4593f060e6a368d7bb5af5273b8e42810cdef90", prompts[0])
+        self.assertIn("read-only context", prompts[0])
+        self.assertIn("Do not clone, install, import from, execute", prompts[0])
+        self.assertIn("run only on supplied `evidence_rows`", prompts[0])
+        eval_result = evaluate_starter_code(
+            result.data["code"],
+            evidence_rows=[
+                {
+                    "source_id": "P0.S1",
+                    "text_hash": "hash1",
+                    "text": "LoRA adds low-rank adapters to model weights.",
+                    "gold": "attention",
+                },
+                {
+                    "source_id": "P0.S2",
+                    "text_hash": "hash2",
+                    "text": "A direct baseline is included for contrast.",
+                    "gold": "",
+                },
+            ],
+            require_evidence_rows=True,
+        )
+        self.assertTrue(eval_result.passed, eval_result.reasons)
+
+    def test_starter_code_rejects_failure_condition_mismatch_before_fallback(self):
+        code = self.source_bound_starter_code(bad_failure_flag=True)
+        gateway = ModelGateway(
+            provider="hf",
+            call_model=lambda *_: json.dumps(
+                {
+                    "code": code,
+                    "why_this_matches_span": "Uses the compact evidence reranker selected span.",
+                    "limitations": ["Source-bound run is not full paper reproduction."],
+                }
+            ),
+        )
+
+        result = gateway.starter_code(
+            "Demo Paper",
+            "compact evidence reranker improves top five precision",
+            "The compact evidence reranker improves top five precision in indexed source evidence. A direct retrieval baseline remains as a contrast source span.",
+            {
+                "research_question": "Does compact evidence reranking improve top five precision?",
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                "metric": "Top-5 Precision",
+            },
+            "en",
+            use_model=True,
+        )
+
+        self.assertTrue(result.used_fallback)
+        self.assertIn("failure_condition must match", result.error or "")
+
+    def test_starter_code_uses_second_repair_attempt_before_fallback(self):
+        calls: list[str] = []
+
+        def repairing_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return json.dumps(
+                    {
+                        "code": "def baseline(example):\n    return {}\n",
+                        "why_this_matches_span": "Initial output is too generic.",
+                        "limitations": ["Needs stricter repair."],
+                    }
+                )
+            if len(calls) == 2:
+                return json.dumps(
+                    {
+                        "code": "def baseline(example):\n    return {}\n\ndef run(evidence_rows=None):\n    return []\n",
+                        "why_this_matches_span": "First repair still leaves the trivial baseline.",
+                        "limitations": ["Needs one more pass."],
+                    }
+                )
+            return json.dumps(
+                {
+                    "code": self.source_bound_starter_code(),
+                    "why_this_matches_span": "Second repair adds explicit contrast modes and a non-trivial local baseline.",
+                    "limitations": ["Source-bound run is not a full paper reproduction."],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=repairing_call)
+        result = gateway.starter_code(
+            "Attention Is All You Need",
+            "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. A recurrence baseline remains as a contrast source span.",
+            "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely.",
+            {
+                "research_question": "Can an attention-style global scorer recover the selected claim better than a local baseline?",
+                "mini_lab_goal": "Compare a local baseline against an attention-style scorer on indexed paper evidence.",
+                "dataset": {"name": "Indexed PaperLens evidence window", "source": "selected span plus contrast spans"},
+                "baseline": "Local or first-match heuristic without the attention-style bonus.",
+                "metric": "label accuracy on indexed paper evidence",
+                "ablation": "Remove only the attention-style global scoring bonus and keep everything else fixed.",
+                "failure_condition": "The mini-lab fails if label accuracy on indexed paper evidence does not improve.",
+                "expected_result": "A small directional gain on long-range or distractor-heavy examples.",
+            },
+            "ko",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(calls), 3)
+        self.assertIn('"mode": "global"', result.data["code"])
+
+    def test_experiment_spec_heavy_model_plan_is_reduced_to_source_run(self):
         def heavy_call(prompt, model_id, max_new_tokens):
             return json.dumps(
                 {
                     "research_question": "Does the Transformer improve BLEU on WMT14?",
                     "mini_lab_goal": "Train an LSTM and Transformer on WMT14.",
-                    "dataset": {"name": "WMT14", "fallback": "wmt14_small_tiny"},
+                    "dataset": {"name": "WMT14", "fallback": "full benchmark subset"},
                     "baseline": "PyTorch LSTM seq2seq",
                     "metric": "BLEU with sacrebleu",
                     "steps": ["Download and load WMT14", "Train for 100 epochs", "Evaluate BLEU"],
@@ -202,17 +595,17 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertFalse(result.used_fallback)
         self.assertIn("repair_notes", result.data)
         self.assertTrue(evaluate_experiment_spec(result.data).passed)
-        self.assertIn("dependency-free", " ".join(result.data["steps"]).lower())
+        self.assertIn("source", json.dumps(result.data).lower())
         self.assertNotIn("wmt14", json.dumps(result.data).lower())
         self.assertNotIn("100 epochs", json.dumps(result.data).lower())
 
-    def test_experiment_spec_cuda_multiday_plan_is_reduced_to_smoke_test(self):
+    def test_experiment_spec_cuda_multiday_plan_is_reduced_to_source_run(self):
         def heavy_call(prompt, model_id, max_new_tokens):
             return json.dumps(
                 {
                     "research_question": "Can a full training run on CUDA P100 reproduce the paper?",
                     "mini_lab_goal": "Run multi-day distributed training.",
-                    "dataset": {"name": "large dataset", "fallback": "toy examples"},
+                    "dataset": {"name": "large dataset", "fallback": "full benchmark subset"},
                     "baseline": "TensorFlow full model",
                     "metric": "full benchmark score",
                     "steps": ["Provision CUDA", "Run multi-day full training run", "Compare results"],
@@ -242,6 +635,969 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertIn("dependency-free", repaired_text)
         self.assertNotIn("cuda", repaired_text)
         self.assertNotIn("multi-day", repaired_text)
+
+    def test_experiment_spec_dataset_is_bound_to_indexed_paper_evidence(self):
+        def loose_dataset_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "research_question": "Can attention-only scoring separate selected evidence from context?",
+                    "mini_lab_goal": "Compare a local baseline with an attention-style scorer.",
+                    "dataset": {"name": "small sentence set"},
+                    "baseline": "Local first-match scorer",
+                    "metric": "label accuracy on selected evidence",
+                    "steps": ["Load rows", "Run baseline", "Run variant", "Compare metric"],
+                    "ablation": "Disable only the attention-style global scoring bonus.",
+                    "failure_condition": "label accuracy on selected evidence does not improve.",
+                    "expected_result": "The attention-style scorer may improve the selected row.",
+                    "faithfulness_notes": [],
+                    "starter_code_plan": ["baseline", "variant", "score"],
+                    "support_span_ids": ["selected"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=loose_dataset_call)
+        result = gateway.experiment_spec(
+            "Attention Is All You Need",
+            "We propose the Transformer based solely on attention mechanisms.",
+            "",
+            "We propose the Transformer based solely on attention mechanisms.",
+            "Try this span.",
+            "en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertTrue(evaluate_experiment_spec(result.data).passed)
+        dataset_text = json.dumps(result.data["dataset"], ensure_ascii=False).lower()
+        self.assertIn("indexed", dataset_text)
+        self.assertIn("paperlens", dataset_text)
+        self.assertIn("evidence", dataset_text)
+
+    def test_experiment_spec_rejects_toy_wording_before_fallback(self):
+        def toy_wording_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "research_question": "Can the selected mechanism improve a source-bound signal?",
+                    "mini_lab_goal": "Run a toy setup for the selected mechanism.",
+                    "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                    "baseline": "Direct baseline",
+                    "metric": "source-bound label accuracy",
+                    "steps": ["Load indexed rows", "Run baseline", "Run variant", "Compare metric"],
+                    "ablation": "Disable only the selected mechanism.",
+                    "failure_condition": "source-bound label accuracy does not improve.",
+                    "expected_result": "The source-bound variant may improve.",
+                    "faithfulness_notes": ["The scale is reduced to a toy problem for speed."],
+                    "starter_code_plan": ["baseline", "variant", "score"],
+                    "support_span_ids": ["selected"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=toy_wording_call)
+        result = gateway.experiment_spec(
+            "Demo Paper",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "Try this span.",
+            "en",
+            use_model=True,
+        )
+
+        self.assertTrue(result.used_fallback)
+        self.assertIn("toy", result.error or "")
+        self.assertNotIn("toy", json.dumps(result.data).lower())
+
+    def test_experiment_spec_uses_model_repair_for_toy_wording(self):
+        calls = []
+
+        def repairing_toy_wording_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if "repairing a PaperLens Lab experiment spec" in prompt:
+                return json.dumps(
+                    {
+                        "research_question": "Can the selected mechanism improve a source-bound signal?",
+                        "mini_lab_goal": "Run a source-indexed comparison for the selected mechanism.",
+                        "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                        "baseline": "Direct baseline",
+                        "metric": "source-bound label accuracy",
+                        "steps": ["Load indexed rows", "Run baseline", "Run variant", "Compare metric"],
+                        "ablation": "Disable only the selected mechanism.",
+                        "failure_condition": "source-bound label accuracy does not improve.",
+                        "expected_result": "The source-bound variant may improve.",
+                        "faithfulness_notes": ["Use only the indexed evidence rows visible in the paper reader."],
+                        "starter_code_plan": ["baseline", "variant", "score"],
+                        "support_span_ids": ["selected"],
+                    }
+                )
+            return json.dumps(
+                {
+                    "research_question": "Can the selected mechanism improve a source-bound signal?",
+                    "mini_lab_goal": "Run a toy setup for the selected mechanism.",
+                    "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                    "baseline": "Direct baseline",
+                    "metric": "source-bound label accuracy",
+                    "steps": ["Load indexed rows", "Run baseline", "Run variant", "Compare metric"],
+                    "ablation": "Disable only the selected mechanism.",
+                    "failure_condition": "source-bound label accuracy does not improve.",
+                    "expected_result": "The source-bound variant may improve.",
+                    "faithfulness_notes": ["The scale is reduced to a toy problem for speed."],
+                    "starter_code_plan": ["baseline", "variant", "score"],
+                    "support_span_ids": ["selected"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=repairing_toy_wording_call)
+        result = gateway.experiment_spec(
+            "Demo Paper",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "Try this span.",
+            "en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(evaluate_experiment_spec(result.data).passed)
+        self.assertNotIn("toy", json.dumps(result.data).lower())
+
+    def test_experiment_spec_rejects_synthetic_sequence_wording_before_fallback(self):
+        def synthetic_wording_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "research_question": "Can the selected mechanism improve a source-bound signal?",
+                    "mini_lab_goal": "Create a synthetic sequence for the selected mechanism.",
+                    "dataset": {"name": "Synthetic dataset", "source": "simulated examples"},
+                    "baseline": "Direct baseline",
+                    "metric": "source-bound label accuracy",
+                    "steps": ["Create synthetic examples", "Run baseline", "Run variant"],
+                    "ablation": "Disable only the selected mechanism.",
+                    "failure_condition": "source-bound label accuracy does not improve.",
+                    "expected_result": "The source-bound variant may improve.",
+                    "faithfulness_notes": ["Use synthetic patterns for speed."],
+                    "starter_code_plan": ["baseline", "variant", "score"],
+                    "support_span_ids": ["selected"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=synthetic_wording_call)
+        result = gateway.experiment_spec(
+            "Demo Paper",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "Try this span.",
+            "en",
+            use_model=True,
+        )
+
+        serialized = json.dumps(result.data).lower()
+        self.assertTrue(result.used_fallback)
+        self.assertIn("synthetic", result.error or "")
+        self.assertNotIn("synthetic", serialized)
+        self.assertNotIn("simulated", serialized)
+
+    def test_experiment_spec_rejects_legacy_fallback_random_vector_dataset_before_fallback(self):
+        def random_dataset_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "research_question": "Can attention connect source evidence rows?",
+                    "mini_lab_goal": "Compare attention over a randomly initialized sequence of vectors.",
+                    "dataset": {
+                        "name": "Indexed PaperLens evidence window",
+                        "fallback": "Randomly initialized sequence of vectors",
+                    },
+                    "baseline": "Direct baseline",
+                    "metric": "source-bound label accuracy",
+                    "steps": ["Build random-vector dataset", "Run baseline", "Run variant"],
+                    "ablation": "Disable only the selected mechanism.",
+                    "failure_condition": "source-bound label accuracy does not improve.",
+                    "expected_result": "The source-bound variant may improve.",
+                    "faithfulness_notes": ["Use generated-inputs only for speed."],
+                    "starter_code_plan": ["baseline", "variant", "score"],
+                    "support_span_ids": ["selected"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=random_dataset_call)
+        result = gateway.experiment_spec(
+            "Demo Paper",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "",
+            "The selected mechanism improves a measurable source-bound behavior.",
+            "Try this span.",
+            "en",
+            use_model=True,
+        )
+
+        serialized = json.dumps(result.data).lower()
+        self.assertTrue(result.used_fallback)
+        self.assertIn("fallback input source", result.error or "")
+        self.assertNotIn("fallback", result.data["dataset"])
+        self.assertNotIn("randomly initialized", serialized)
+        self.assertNotIn("random vectors", serialized)
+        self.assertNotIn("random-vector", serialized)
+        self.assertNotIn("generated inputs", serialized)
+        self.assertNotIn("generated-inputs", serialized)
+
+    def test_experiment_spec_uses_only_source_github_implementation_links(self):
+        def repo_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "research_question": "Can the selected mechanism improve a source-bound signal?",
+                    "mini_lab_goal": "Run a source-bound probe for the selected mechanism.",
+                    "dataset": {"name": "Indexed PaperLens evidence window", "source": "source-index rows"},
+                    "baseline": "Direct baseline",
+                    "metric": "source-bound label accuracy",
+                    "steps": [
+                        "Load indexed rows",
+                        "Inspect https://github.com/made/up before running the baseline.",
+                        "Run variant",
+                    ],
+                    "ablation": "Disable only the selected mechanism.",
+                    "failure_condition": "source-bound label accuracy does not improve.",
+                    "expected_result": "The source-bound variant may improve.",
+                    "faithfulness_notes": ["Do not rely on https://github.com/made/up unless it appears in the paper."],
+                    "implementation_repositories": [
+                        {"url": "https://github.com/made/up", "usage": "invented repo"}
+                    ],
+                    "starter_code_plan": ["baseline", "variant", "score"],
+                    "support_span_ids": ["selected"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=repo_call)
+        result = gateway.experiment_spec(
+            "LoRA: Low-Rank Adaptation of Large Language Models",
+            "We provide our implementations and model checkpoints for RoBERTa, DeBERTa, and GPT-2.",
+            "",
+            (
+                "We release a package that facilitates the integration of LoRA with PyTorch models "
+                "and provide our implementations and model checkpoints for RoBERTa, DeBERTa, and GPT-2 "
+                "at https://github.com/microsoft/LoRA."
+            ),
+            "Try this span.",
+            "en",
+            use_model=True,
+        )
+
+        repos = result.data["implementation_repositories"]
+        serialized = json.dumps(result.data).lower()
+        self.assertFalse(result.used_fallback)
+        self.assertTrue(evaluate_experiment_spec(result.data).passed)
+        self.assertEqual(repos[0]["url"], "https://github.com/microsoft/LoRA")
+        self.assertEqual(repos[0]["source_url"], "https://github.com/microsoft/LoRA")
+        self.assertNotIn("made/up", serialized)
+        self.assertIn("Implementation repositories", result.text)
+
+    def test_experiment_candidates_accept_list_fields_without_fallback(self):
+        def candidate_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": "gpu-replication-probe",
+                            "title": "GPU replication probe for the selected training claim",
+                            "kind": "gpu_replication_probe",
+                            "is_recommended": True,
+                            "recommendation_reason": "It directly checks the selected GPU-backed training claim.",
+                            "hypothesis": "A short CUDA-backed run can validate whether the selected method produces a measurable training signal.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": [
+                                "The selected span reports a GPU-backed training result for the proposed method."
+                            ],
+                            "dataset": {
+                                "name": "Paper-specified public benchmark subset",
+                                "source": "dataset named in the selected paper evidence",
+                                "requires_download": True,
+                            },
+                            "implementation": {
+                                "type": "source_bound_probe",
+                                "repo_url": "",
+                                "reason": "No source-listed repository is present in the selected evidence.",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 12,
+                            "expected_metric": "validation_accuracy",
+                            "limitations": ["Short replication probe, not the full paper-scale run."],
+                            "approval_question": "Run this GPU replication probe?",
+                        },
+                        {
+                            "id": "source-window-audit",
+                            "title": "Source evidence audit for the selected claim",
+                            "kind": "source_bound_probe",
+                            "is_recommended": False,
+                            "recommendation_reason": "Useful as a pre-run evidence check.",
+                            "hypothesis": "The selected claim can be checked against surrounding source evidence before launching the GPU run.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": [
+                                "The selected span reports a GPU-backed training result for the proposed method."
+                            ],
+                            "dataset": {
+                                "name": "PaperLens indexed evidence window",
+                                "source": "selected span and adjacent source-index rows",
+                                "requires_download": False,
+                            },
+                            "implementation": {
+                                "type": "source_bound_probe",
+                                "repo_url": "",
+                                "reason": "Evidence-only audit before execution.",
+                            },
+                            "gpu_required": False,
+                            "estimated_runtime_minutes": 1,
+                            "expected_metric": "evidence_support",
+                            "limitations": ["Does not execute the training claim."],
+                            "approval_question": "Run the evidence audit first?",
+                        },
+                    ],
+                    "recommended_candidate_id": "gpu-replication-probe",
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=candidate_call)
+        result = gateway.experiment_candidates(
+            paper_title="GPU Training Paper",
+            selected_span="The selected span reports a GPU-backed training result for the proposed method.",
+            translated_span="",
+            source_text=(
+                "The selected span reports a GPU-backed training result for the proposed method. "
+                "The surrounding paper text names the benchmark and metric."
+            ),
+            question="What experiment should we run from this span?",
+            locale="en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback, result.error)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.data["recommended_candidate_id"], "gpu-replication-probe")
+        self.assertEqual(len(result.data["candidates"]), 2)
+        self.assertTrue(result.data["candidates"][0]["gpu_required"])
+
+    def test_experiment_candidates_reject_exact_without_source_repo(self):
+        def candidate_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": "exact-reproduction",
+                            "title": "Exact reproduction",
+                            "kind": "gpu_replication_probe",
+                            "reproduction_level": "exact",
+                            "faithfulness": {
+                                "level": "exact",
+                                "summary": "Claims exact reproduction.",
+                                "why_not_exact": "",
+                                "paper_targets": ["accuracy"],
+                                "resource_note": "short run",
+                            },
+                            "is_recommended": True,
+                            "recommendation_reason": "It claims to be exact.",
+                            "hypothesis": "Run the selected claim exactly.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports the claim."],
+                            "dataset": {"name": "Public benchmark", "source": "public", "requires_download": True},
+                            "implementation": {"type": "public_dataset", "repo_url": "", "reason": "No paper repo listed."},
+                            "run_plan": {
+                                "repo_url": "",
+                                "config_path": "",
+                                "command": "python run.py",
+                                "dataset": "Public benchmark",
+                                "expected_artifact": "accuracy",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 10,
+                            "expected_metric": "accuracy",
+                            "limitations": ["Short run."],
+                            "approval_question": "Run exact reproduction?",
+                        },
+                        {
+                            "id": "scaled-reproduction",
+                            "title": "Scaled reproduction",
+                            "kind": "gpu_replication_probe",
+                            "reproduction_level": "scaled",
+                            "faithfulness": {
+                                "level": "scaled",
+                                "summary": "Bounded run.",
+                                "why_not_exact": "No source-listed implementation repo is present.",
+                                "paper_targets": ["accuracy"],
+                                "resource_note": "short run",
+                            },
+                            "is_recommended": False,
+                            "recommendation_reason": "Safer bounded option.",
+                            "hypothesis": "Run a bounded public-data reproduction.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports the claim."],
+                            "dataset": {"name": "Public benchmark", "source": "public", "requires_download": True},
+                            "implementation": {"type": "public_dataset", "repo_url": "", "reason": "No paper repo listed."},
+                            "run_plan": {
+                                "repo_url": "",
+                                "config_path": "",
+                                "command": "python run_scaled.py",
+                                "dataset": "Public benchmark",
+                                "expected_artifact": "accuracy",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 10,
+                            "expected_metric": "accuracy",
+                            "limitations": ["Not exact."],
+                            "approval_question": "Run scaled reproduction?",
+                        },
+                    ],
+                    "recommended_candidate_id": "exact-reproduction",
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=candidate_call)
+        result = gateway.experiment_candidates(
+            paper_title="Repo-less Paper",
+            selected_span="The selected span reports the claim.",
+            translated_span="",
+            source_text="The selected span reports the claim.",
+            question="Can we reproduce this exactly?",
+            locale="en",
+            reproduction_level="exact",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIn("exact reproduction without a source-listed paper repo", result.error or "")
+
+    def test_experiment_candidates_reject_exact_with_repo_but_missing_run_plan_details(self):
+        repo_url = "https://github.com/example/official-paper-repo"
+
+        def candidate_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": "exact-reproduction",
+                            "title": "Exact reproduction",
+                            "kind": "gpu_replication_probe",
+                            "reproduction_level": "exact",
+                            "faithfulness": {
+                                "level": "exact",
+                                "summary": "Claims exact reproduction.",
+                                "why_not_exact": "",
+                                "paper_targets": ["accuracy"],
+                                "resource_note": "short run",
+                            },
+                            "is_recommended": True,
+                            "recommendation_reason": "It claims to be exact.",
+                            "hypothesis": "Run the selected claim exactly.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports the claim."],
+                            "dataset": {"name": "Official benchmark", "source": "paper repo", "requires_download": True},
+                            "implementation": {"type": "paper_repo", "repo_url": repo_url, "reason": "Source-listed repo."},
+                            "run_plan": {
+                                "repo_url": repo_url,
+                                "config_path": "",
+                                "command": "",
+                                "dataset": "",
+                                "expected_artifact": "accuracy",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 10,
+                            "expected_metric": "accuracy",
+                            "limitations": ["Short run."],
+                            "approval_question": "Run exact reproduction?",
+                        },
+                        {
+                            "id": "scaled-reproduction",
+                            "title": "Scaled reproduction",
+                            "kind": "gpu_replication_probe",
+                            "reproduction_level": "scaled",
+                            "faithfulness": {
+                                "level": "scaled",
+                                "summary": "Bounded run.",
+                                "why_not_exact": "No config path is confirmed.",
+                                "paper_targets": ["accuracy"],
+                                "resource_note": "short run",
+                            },
+                            "is_recommended": False,
+                            "recommendation_reason": "Safer bounded option.",
+                            "hypothesis": "Run a bounded repo-adjacent reproduction.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports the claim."],
+                            "dataset": {"name": "Official benchmark", "source": "paper repo", "requires_download": True},
+                            "implementation": {"type": "paper_repo", "repo_url": repo_url, "reason": "Source-listed repo."},
+                            "run_plan": {
+                                "repo_url": repo_url,
+                                "config_path": "",
+                                "command": "python run_scaled.py",
+                                "dataset": "Official benchmark subset",
+                                "expected_artifact": "accuracy",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 10,
+                            "expected_metric": "accuracy",
+                            "limitations": ["Not exact."],
+                            "approval_question": "Run scaled reproduction?",
+                        },
+                    ],
+                    "recommended_candidate_id": "exact-reproduction",
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=candidate_call)
+        result = gateway.experiment_candidates(
+            paper_title="Repo Paper",
+            selected_span="The selected span reports the claim.",
+            translated_span="",
+            source_text=f"The selected span reports the claim. Official implementation: {repo_url}",
+            question="Can we reproduce this exactly?",
+            locale="en",
+            reproduction_level="exact",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIn("without run_plan.config_path", result.error or "")
+        self.assertIn("without run_plan.command", result.error or "")
+        self.assertIn("without run_plan.dataset", result.error or "")
+
+    def test_gpu_script_repairs_mock_random_dataset_before_service_run(self):
+        calls: list[str] = []
+
+        def gpu_script_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return json.dumps(
+                    {
+                        "script": (
+                            "import torch\n"
+                            "from torchtext.data.utils import get_tokenizer\n"
+                            "from torch.utils.data import Dataset\n\n"
+                            "class MockTranslationDataset(Dataset):\n"
+                            "    def __init__(self):\n"
+                            "        self.inputs = torch.randint(0, 100, (32, 16))\n"
+                            "    def __len__(self):\n"
+                            "        return len(self.inputs)\n"
+                            "    def __getitem__(self, index):\n"
+                            "        return self.inputs[index]\n\n"
+                            "def run_paperlens_gpu_probe(config=None):\n"
+                            "    return {'passed': True, 'metrics': {}, 'rows': [], 'logs': [], 'hardware': {'cudaAvailable': torch.cuda.is_available()}, 'dataset': {'name': 'MockTranslationDataset'}, 'limitations': [], 'claim_comparison': {}}\n"
+                        ),
+                        "entrypoint": "run_paperlens_gpu_probe",
+                        "dependencies": ["torch"],
+                        "hardware": "T4",
+                        "dataset": {"name": "MockTranslationDataset", "source": "generated tensors"},
+                        "expected_outputs": ["loss"],
+                        "paper_claim_comparison_plan": "Compare speed.",
+                        "limitations": ["Generated tensor data."],
+                    }
+                )
+            if len(calls) == 2:
+                return json.dumps(
+                    {
+                        "script": (
+                            "import torch\n"
+                            "from datasets import load_dataset\n\n"
+                            "def run_paperlens_gpu_probe(config=None):\n"
+                            "    cuda = torch.cuda.is_available()\n"
+                            "    records = load_dataset('multi30k', split='train[:8]')\n"
+                            "    value = eval('len(records)')\n"
+                            "    return {'passed': True, 'metrics': {'rows': value}, 'rows': [{'metric': 'rows', 'value': value}], 'logs': [], 'hardware': {'cudaAvailable': cuda}, 'dataset': {'name': 'Multi30k'}, 'limitations': [], 'claim_comparison': {}}\n"
+                        ),
+                        "entrypoint": "run_paperlens_gpu_probe",
+                        "dependencies": ["torch", "datasets"],
+                        "hardware": "T4",
+                        "dataset": {"name": "Multi30k", "source": "bentrevett/multi30k train[:8]"},
+                        "expected_outputs": ["rows"],
+                        "paper_claim_comparison_plan": "Load a bounded public dataset subset.",
+                        "limitations": ["Not full WMT14 training."],
+                    }
+                )
+            return json.dumps(
+                {
+                    "script": (
+                        "import torch\n"
+                        "from datasets import load_dataset\n\n"
+                        "def run_paperlens_gpu_probe(config=None):\n"
+                        "    config = config or {}\n"
+                        "    cuda = torch.cuda.is_available()\n"
+                        "    device = torch.device('cuda' if cuda else 'cpu')\n"
+                        "    records = load_dataset('bentrevett/multi30k', split='train[:64]')\n"
+                        "    lengths = [len(str(row.get('en') or '').split()) for row in records]\n"
+                        "    tensor = torch.tensor(lengths, dtype=torch.float32, device=device)\n"
+                        "    mean_length = float(tensor.mean().detach().cpu()) if tensor.numel() else 0.0\n"
+                        "    return {\n"
+                        "        'passed': bool(tensor.numel()),\n"
+                        "        'metrics': {'mean_english_tokens': mean_length},\n"
+                        "        'rows': [{'metric': 'mean_english_tokens', 'value': mean_length, 'split': 'train[:64]'}],\n"
+                        "        'logs': ['Loaded a bounded public Multi30k subset through datasets.'],\n"
+                        "        'hardware': {'cudaAvailable': cuda, 'device': str(device)},\n"
+                        "        'dataset': {'name': 'Multi30k', 'source': 'bentrevett/multi30k train[:64]'},\n"
+                        "        'limitations': ['Directional GPU data-loading and metric probe, not full WMT14 training.'],\n"
+                        "        'claim_comparison': {'verdict': 'directional_probe_only'},\n"
+                        "    }\n"
+                    ),
+                    "entrypoint": "run_paperlens_gpu_probe",
+                    "dependencies": ["torch", "datasets"],
+                    "hardware": "T4",
+                    "dataset": {"name": "Multi30k", "source": "bentrevett/multi30k train[:64]"},
+                    "reproduction_level": "probe",
+                    "reproduction_plan": {
+                        "level": "probe",
+                        "repo_url": "",
+                        "config_path": "",
+                        "command": "",
+                        "dataset": "bentrevett/multi30k train[:64]",
+                        "expected_artifact": "mean_english_tokens",
+                        "faithfulness_note": "Directional probe only.",
+                    },
+                    "expected_outputs": ["mean_english_tokens"],
+                    "paper_claim_comparison_plan": "Use a bounded real translation dataset subset as a directional probe.",
+                    "limitations": ["Not full WMT14 training."],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=gpu_script_call)
+        result = gateway.gpu_script(
+            paper_title="Attention Is All You Need",
+            selected_span="Experiments on two machine translation tasks show the Transformer is more parallelizable.",
+            source_text=(
+                "Experiments on two machine translation tasks show the Transformer is more parallelizable. "
+                "The paper reports WMT 2014 English-to-German and English-to-French translation results."
+            ),
+            candidate={
+                "id": "gpu-replication-probe",
+                "title": "Translation GPU probe",
+                "kind": "gpu_replication_probe",
+                "reproduction_level": "probe",
+                "paper_evidence_ids": ["selected"],
+                "dataset": {"name": "public translation subset", "source": "public dataset"},
+                "expected_metric": "bounded translation metric",
+            },
+            locale="en",
+            implementation_repo_manifests=[],
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback, result.error)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("load_dataset", result.data["script"])
+        self.assertNotIn("MockTranslationDataset", result.data["script"])
+        self.assertNotIn("torchtext", result.data["script"])
+        self.assertNotIn("torch.randint", result.data["script"])
+        self.assertNotIn("eval(", result.data["script"])
+        self.assertNotIn("load_dataset('multi30k'", result.data["script"])
+        self.assertIn("bentrevett/multi30k", result.data["script"])
+
+    def test_gpu_script_validation_failure_does_not_fallback(self):
+        def invalid_gpu_script_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "script": (
+                        "import torch\n\n"
+                        "def run_paperlens_gpu_probe(config=None):\n"
+                        "    data = torch.randn(8, 16)\n"
+                        "    return {'passed': True, 'metrics': {'rows': 8}, 'rows': [], "
+                        "'logs': [], 'hardware': {'cudaAvailable': torch.cuda.is_available()}, "
+                        "'dataset': {'name': 'generated tensors'}, 'limitations': [], "
+                        "'claim_comparison': {}}\n"
+                    ),
+                    "entrypoint": "run_paperlens_gpu_probe",
+                    "dependencies": ["torch"],
+                    "hardware": "T4",
+                    "dataset": {"name": "Generated", "source": "torch.randn"},
+                    "expected_outputs": ["rows"],
+                    "paper_claim_comparison_plan": "Compare throughput.",
+                    "limitations": ["Generated tensors."],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=invalid_gpu_script_call)
+        result = gateway.gpu_script(
+            paper_title="Attention Is All You Need",
+            selected_span="Experiments show the Transformer is more parallelizable.",
+            source_text="Experiments show the Transformer is more parallelizable on translation tasks.",
+            candidate={
+                "id": "gpu-replication-probe",
+                "title": "Translation GPU probe",
+                "kind": "gpu_replication_probe",
+                "paper_evidence_ids": ["selected"],
+                "dataset": {"name": "public translation subset", "source": "public dataset"},
+                "expected_metric": "tokens/sec",
+            },
+            locale="en",
+            implementation_repo_manifests=[],
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIn("torch.randn", result.error or "")
+        self.assertNotIn("fallback used", result.error or "")
+
+    def test_exact_gpu_script_requires_repo_config_dataset_and_command_plan(self):
+        calls: list[str] = []
+
+        def exact_script_without_plan_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            return json.dumps(
+                {
+                    "script": (
+                        "import torch\n\n"
+                        "def run_paperlens_gpu_probe(config=None):\n"
+                        "    cuda = torch.cuda.is_available()\n"
+                        "    model = torch.nn.Linear(4, 2)\n"
+                        "    model.eval()\n"
+                        "    return {\n"
+                        "        'passed': True,\n"
+                        "        'metrics': {'rows': 1},\n"
+                        "        'rows': [{'metric': 'rows', 'value': 1}],\n"
+                        "        'logs': ['repo-backed exact run plan was not executed'],\n"
+                        "        'hardware': {'cudaAvailable': cuda},\n"
+                        "        'dataset': {'name': 'ImageNet validation', 'source': 'paper repo config'},\n"
+                        "        'limitations': ['bounded validation slice'],\n"
+                        "        'claim_comparison': {'verdict': 'completed'},\n"
+                        "    }\n"
+                    ),
+                    "entrypoint": "run_paperlens_gpu_probe",
+                    "dependencies": ["torch"],
+                    "hardware": "T4",
+                    "dataset": {"name": "ImageNet validation", "source": "paper repo config"},
+                    "reproduction_level": "exact",
+                    "reproduction_plan": {
+                        "level": "exact",
+                        "repo_url": "",
+                        "config_path": "",
+                        "command": "",
+                        "dataset": "",
+                        "expected_artifact": "top1 accuracy",
+                        "faithfulness_note": "Exact label without executable repo plan must be rejected.",
+                    },
+                    "expected_outputs": ["top1 accuracy"],
+                    "paper_claim_comparison_plan": "Compare with the reported ImageNet table.",
+                    "limitations": ["bounded validation slice"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=exact_script_without_plan_call)
+        result = gateway.gpu_script(
+            paper_title="Deep Residual Learning for Image Recognition",
+            selected_span="We provide comprehensive empirical evidence.",
+            source_text="Official implementation: https://github.com/KaimingHe/deep-residual-networks",
+            candidate={
+                "id": "exact-reproduction",
+                "title": "Exact ImageNet reproduction",
+                "kind": "gpu_replication_probe",
+                "reproduction_level": "exact",
+                "paper_evidence_ids": ["selected"],
+                "implementation": {
+                    "type": "paper_repo",
+                    "repo_url": "https://github.com/KaimingHe/deep-residual-networks",
+                },
+                "dataset": {"name": "ImageNet validation", "source": "official config"},
+                "expected_metric": "top1 accuracy",
+            },
+            locale="en",
+            implementation_repo_manifests=[
+                {"url": "https://github.com/KaimingHe/deep-residual-networks", "status": "inspected"}
+            ],
+            use_model=True,
+        )
+
+        self.assertEqual(len(calls), 4)
+        self.assertFalse(result.used_fallback)
+        self.assertIn("exact GPU script requires reproduction_plan.repo_url", result.error or "")
+        self.assertIn("exact GPU script requires reproduction_plan.config_path", result.error or "")
+        self.assertIn("exact GPU script requires reproduction_plan.command", result.error or "")
+        self.assertIn("exact GPU script requires reproduction_plan.dataset", result.error or "")
+        self.assertNotIn("blocked call eval", result.error or "")
+
+    def test_exact_gpu_script_repo_must_match_inspected_paper_repo(self):
+        def exact_script_wrong_repo_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "script": (
+                        "import torch\n\n"
+                        "def run_paperlens_gpu_probe(config=None):\n"
+                        "    cuda = torch.cuda.is_available()\n"
+                        "    model = torch.nn.Linear(4, 2)\n"
+                        "    model.eval()\n"
+                        "    return {\n"
+                        "        'passed': True,\n"
+                        "        'metrics': {'rows': 1},\n"
+                        "        'rows': [{'metric': 'rows', 'value': 1}],\n"
+                        "        'logs': ['repo-backed exact run plan was executed'],\n"
+                        "        'hardware': {'cudaAvailable': cuda},\n"
+                        "        'dataset': {'name': 'ImageNet validation', 'source': 'paper repo config'},\n"
+                        "        'limitations': ['bounded validation slice'],\n"
+                        "        'claim_comparison': {'verdict': 'completed'},\n"
+                        "    }\n"
+                    ),
+                    "entrypoint": "run_paperlens_gpu_probe",
+                    "dependencies": ["torch"],
+                    "hardware": "T4",
+                    "dataset": {"name": "ImageNet validation", "source": "paper repo config"},
+                    "reproduction_level": "exact",
+                    "reproduction_plan": {
+                        "level": "exact",
+                        "repo_url": "https://github.com/other/repo",
+                        "config_path": "configs/eval.yaml",
+                        "command": "python tools/eval.py --config configs/eval.yaml",
+                        "dataset": "ImageNet validation",
+                        "expected_artifact": "top1 accuracy",
+                        "faithfulness_note": "Exact plan uses the wrong repo.",
+                    },
+                    "expected_outputs": ["top1 accuracy"],
+                    "paper_claim_comparison_plan": "Compare with the reported ImageNet table.",
+                    "limitations": ["bounded validation slice"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=exact_script_wrong_repo_call)
+        result = gateway.gpu_script(
+            paper_title="Deep Residual Learning for Image Recognition",
+            selected_span="We provide comprehensive empirical evidence.",
+            source_text="Official implementation: https://github.com/KaimingHe/deep-residual-networks",
+            candidate={
+                "id": "exact-reproduction",
+                "title": "Exact ImageNet reproduction",
+                "kind": "gpu_replication_probe",
+                "reproduction_level": "exact",
+                "paper_evidence_ids": ["selected"],
+                "implementation": {
+                    "type": "paper_repo",
+                    "repo_url": "https://github.com/KaimingHe/deep-residual-networks",
+                },
+                "dataset": {"name": "ImageNet validation", "source": "official config"},
+                "expected_metric": "top1 accuracy",
+            },
+            locale="en",
+            implementation_repo_manifests=[
+                {"url": "https://github.com/KaimingHe/deep-residual-networks", "status": "inspected"}
+            ],
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIn("exact GPU script repo_url must match an inspected paper implementation repo", result.error or "")
+        self.assertNotIn("blocked call eval", result.error or "")
+
+    def test_exact_gpu_script_must_match_approved_reproduction_level(self):
+        def scaled_script_for_exact_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "script": (
+                        "import torch\n\n"
+                        "def run_paperlens_gpu_probe(config=None):\n"
+                        "    cuda = torch.cuda.is_available()\n"
+                        "    model = torch.nn.Linear(4, 2)\n"
+                        "    model.eval()\n"
+                        "    return {\n"
+                        "        'passed': True,\n"
+                        "        'metrics': {'rows': 1},\n"
+                        "        'rows': [{'metric': 'rows', 'value': 1}],\n"
+                        "        'logs': ['scaled run'],\n"
+                        "        'hardware': {'cudaAvailable': cuda},\n"
+                        "        'dataset': {'name': 'ImageNet validation subset', 'source': 'paper repo config'},\n"
+                        "        'limitations': ['bounded validation slice'],\n"
+                        "        'claim_comparison': {'verdict': 'completed'},\n"
+                        "    }\n"
+                    ),
+                    "entrypoint": "run_paperlens_gpu_probe",
+                    "dependencies": ["torch"],
+                    "hardware": "T4",
+                    "dataset": {"name": "ImageNet validation subset", "source": "paper repo config"},
+                    "reproduction_level": "scaled",
+                    "reproduction_plan": {
+                        "level": "scaled",
+                        "repo_url": "",
+                        "config_path": "",
+                        "command": "python run_scaled.py",
+                        "dataset": "ImageNet validation subset",
+                        "expected_artifact": "rows",
+                        "faithfulness_note": "Scaled script must not satisfy an approved exact candidate.",
+                    },
+                    "expected_outputs": ["rows"],
+                    "paper_claim_comparison_plan": "Compare a scaled subset.",
+                    "limitations": ["bounded validation slice"],
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=scaled_script_for_exact_call)
+        result = gateway.gpu_script(
+            paper_title="Deep Residual Learning for Image Recognition",
+            selected_span="We provide comprehensive empirical evidence.",
+            source_text="Official implementation: https://github.com/KaimingHe/deep-residual-networks",
+            candidate={
+                "id": "exact-reproduction",
+                "title": "Exact ImageNet reproduction",
+                "kind": "gpu_replication_probe",
+                "reproduction_level": "exact",
+                "paper_evidence_ids": ["selected"],
+                "implementation": {
+                    "type": "paper_repo",
+                    "repo_url": "https://github.com/KaimingHe/deep-residual-networks",
+                },
+                "dataset": {"name": "ImageNet validation", "source": "official config"},
+                "expected_metric": "top1 accuracy",
+            },
+            locale="en",
+            implementation_repo_manifests=[
+                {"url": "https://github.com/KaimingHe/deep-residual-networks", "status": "inspected"}
+            ],
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIn("reproduction_level must match approved reproduction level", result.error or "")
+
+    def test_growth_ideas_repair_unknown_evidence_ids(self):
+        calls = []
+
+        def growth_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return json.dumps(
+                    {
+                        "ideas": [
+                            {
+                                "idea": "Measure a sharper source-bound contrast.",
+                                "source_evidence": ["paper:selected-span", "run:r1", "growth_idea:invented"],
+                                "novelty_angle": "Narrow the previous observation.",
+                                "testable_next_step": "Reuse indexed evidence rows with a stricter contrast.",
+                                "risk": "The effect may be too small.",
+                            }
+                        ],
+                        "fine_tuning_signal": "none",
+                        "reason": "",
+                    }
+                )
+            return json.dumps(
+                {
+                    "ideas": [
+                        {
+                            "idea": "Measure a sharper source-bound contrast.",
+                            "source_evidence": ["paper:selected-span", "run:r1"],
+                            "novelty_angle": "Narrow the previous observation.",
+                            "testable_next_step": "Reuse indexed evidence rows with a stricter contrast.",
+                            "risk": "The effect may be too small.",
+                        }
+                    ],
+                    "fine_tuning_signal": "none",
+                    "reason": "No repeated model-output failure pattern.",
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=growth_call)
+        result = gateway.growth_ideas(
+            paper_title="Demo Paper",
+            paper_memory=[{"id": "paper:selected-span", "summary": "Source-bound evidence."}],
+            mini_lab_result="run:r1 actual source-bound mini-lab execution",
+            selected_span="Source-bound evidence.",
+            locale="en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.data["ideas"][0]["source_evidence"], ["paper:selected-span", "run:r1"])
 
     def test_fallback_paths_are_structured(self):
         gateway = ModelGateway()

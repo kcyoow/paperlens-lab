@@ -22,11 +22,19 @@ export default function LandingPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [validationSummary, setValidationSummary] = useState<ValidationSummary | null>(null);
+  const [showEvidencePanel, setShowEvidencePanel] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const text = UI_TEXT[locale].landing;
 
   useEffect(() => {
-    setLocale(getInitialLocale(new URLSearchParams(window.location.search).get("lang")));
+    const params = new URLSearchParams(window.location.search);
+    setLocale(getInitialLocale(params.get("lang")));
+    const shouldShowEvidence = params.get("evidence") === "1" || params.get("debug") === "1";
+    setShowEvidencePanel(shouldShowEvidence);
+    if (!shouldShowEvidence) {
+      setValidationSummary(null);
+      return;
+    }
     let cancelled = false;
     loadValidationSummary()
       .then((summary) => {
@@ -244,7 +252,7 @@ export default function LandingPage() {
               <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
               <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
             </svg>
-            {isLoading ? "Loading paper..." : text.startButton}
+            {isLoading ? text.loadingPaper : text.startButton}
           </button>
           {loadError && (
             <p className="mt-3 rounded-lg border border-highlight-red bg-highlight-red/60 px-3 py-2 text-xs text-text-secondary">
@@ -253,7 +261,9 @@ export default function LandingPage() {
           )}
         </div>
 
-        {validationSummary && <ValidationEvidencePanel summary={validationSummary} locale={locale} />}
+        {showEvidencePanel && validationSummary && (
+          <ValidationEvidencePanel summary={validationSummary} locale={locale} />
+        )}
 
         {/* Feature Highlights */}
         <div className="mt-8 grid grid-cols-3 gap-4">
@@ -318,14 +328,25 @@ function ValidationEvidencePanel({
   const traces = summary.modelTraces;
   const localDemo = summary.localDemo;
   const memory = summary.memory;
-  if (!realPaperRun && !traces && !localDemo) return null;
+  const frontendExport = summary.frontendStaticExport;
+  if (!realPaperRun && !traces && !localDemo && !frontendExport) return null;
 
   const title = locale === "ko" ? "실제 논문 검증 스냅샷" : "Real-paper validation snapshot";
   const subtitle =
     locale === "ko"
-      ? "현재 로컬 검증 artifact 기준이며, 새 배포 환경에서는 다시 실행해야 합니다."
+      ? "현재 로컬 검증 결과 파일 기준이며, 새 배포 환경에서는 다시 실행해야 합니다."
       : "Based on local validation artifacts; fresh deployments should run this again.";
-  const fineTuning = realPaperRun?.fineTuningRecommendation ?? "unknown";
+  const fineTuning = realPaperRun?.fineTuningRecommendation ?? (locale === "ko" ? "알 수 없음" : "unknown");
+  const fineTuningLabel =
+    locale === "ko"
+      ? fineTuning === "no"
+        ? "현재 기준 불필요"
+        : fineTuning === "maybe"
+          ? "검토 필요"
+          : fineTuning === "yes"
+            ? "권장"
+            : "알 수 없음"
+      : fineTuning;
   const papers = realPaperRun?.papers?.map((paper) => paper.arxiv || paper.name).filter(Boolean) ?? [];
   const firstPaper = realPaperRun?.papers?.[0];
   const paperRuns = realPaperRun?.papers ?? [];
@@ -336,17 +357,46 @@ function ValidationEvidencePanel({
     growthEvidence.some((item) => item.startsWith("growth_idea:")) &&
     growthEvidence.includes("run:r1");
   const starterOk = realPaperRun?.starterCodePassed === true;
+  const aggregateOk =
+    realPaperRun?.passed === true &&
+    realPaperRun?.evaluationTotal === realPaperRun?.evaluationPassed &&
+    traces?.traceIdsPassed !== false &&
+    (traces?.fallbackCount ?? 0) === 0;
+  const localProofOk =
+    localDemo?.artifactBundleCoherent === true &&
+    localDemo?.traceIdsPassed === true &&
+    localDemo?.sourceIndexConsistent !== false &&
+    localDemo?.quotesInSourceIndex !== false &&
+    localDemo?.translationSourceConsistent !== false &&
+    localDemo?.usedFallback !== true &&
+    localDemo?.translationUsedFallback !== true;
   const scope = paperRuns.length
-    ? `${paperRuns.map((paper) => paper.pageMarkers).join("/")} parsed pages · ${paperRuns
-        .map((paper) => paper.readerSpans)
-        .join("/")} reader spans`
-    : "no scope";
+    ? locale === "ko"
+      ? `${paperRuns.map((paper) => `${paper.pageMarkers}개 페이지 마커`).join(" / ")} · ${paperRuns
+          .map((paper) => `${paper.readerSpans}개 리더 문장`)
+          .join(" / ")}`
+      : `${paperRuns.map((paper) => paper.pageMarkers).join("/")} parsed pages · ${paperRuns
+          .map((paper) => paper.readerSpans)
+          .join("/")} reader spans`
+    : locale === "ko"
+      ? "범위 없음"
+      : "no scope";
   const litmRatio =
     typeof litm?.target_char_offset_ratio === "number"
       ? `${Math.round(litm.target_char_offset_ratio * 100)}%`
-      : "n/a";
+      : locale === "ko"
+        ? "없음"
+        : "n/a";
   const evidenceOk =
     realPaperRun?.evidenceConsistencyPassed !== false && localDemo?.quoteIdsWithinWindow !== false;
+  const frontendExportOk = frontendExport?.ready === true;
+  const frontendExportLabel = frontendExportOk
+    ? locale === "ko"
+      ? "정적 export 준비됨"
+      : "static export ready"
+    : locale === "ko"
+      ? "정적 export 확인 필요"
+      : "static export needs check";
 
   return (
     <section className="mt-5 rounded-2xl border border-border bg-surface p-5 shadow-sm">
@@ -356,7 +406,7 @@ function ValidationEvidencePanel({
           <p className="mt-1 max-w-xl text-xs text-text-muted">{subtitle}</p>
           {realPaperRun?.artifactDate && (
             <p className="mt-1 text-[11px] text-text-muted">
-              {realPaperRun.artifactDate} · {realPaperRun.runName || "validation run"}
+              {realPaperRun.artifactDate} · {realPaperRun.runName || (locale === "ko" ? "검증 실행" : "validation run")}
             </p>
           )}
         </div>
@@ -367,89 +417,115 @@ function ValidationEvidencePanel({
               : "bg-yellow-100 text-yellow-700"
           }`}
         >
-          {summary.ok ? "stored HF traces" : "needs rerun"}
+          {summary.ok
+            ? locale === "ko"
+              ? "현재 검증 묶음 사용 가능"
+              : "validation bundle available"
+            : locale === "ko"
+              ? "재실행 필요"
+              : "needs rerun"}
         </span>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <EvidenceMetric
-          label={locale === "ko" ? "실제 논문" : "real papers"}
-          value={String(realPaperRun?.paperCount ?? 0)}
-        />
-        <EvidenceMetric
-          label={locale === "ko" ? "평가 통과" : "eval passes"}
-          value={`${realPaperRun?.evaluationPassed ?? 0}/${realPaperRun?.evaluationTotal ?? 0}`}
-        />
-        <EvidenceMetric
-          label={locale === "ko" ? "모델 trace" : "model traces"}
-          value={`${traces?.modelCount ?? 0}/${traces?.total ?? 0}`}
-        />
-        <EvidenceMetric
-          label={locale === "ko" ? "fallback" : "fallbacks"}
-          value={String(traces?.fallbackCount ?? 0)}
-        />
-      </div>
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <div className="rounded-2xl border border-border bg-surface-secondary/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-text-primary">
+              {locale === "ko" ? "실제 논문 묶음" : "Real-paper bundle"}
+            </p>
+            <span
+              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                aggregateOk ? "bg-emerald-100 text-emerald-800" : "bg-yellow-100 text-yellow-800"
+              }`}
+            >
+              {aggregateOk
+                ? locale === "ko"
+                  ? "3개 논문 회귀 통과"
+                  : "3-paper regression passed"
+                : locale === "ko"
+                  ? "회귀 재실행 필요"
+                  : "rerun needed"}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <EvidenceMetric
+              label={locale === "ko" ? "실제 논문" : "real papers"}
+              value={String(realPaperRun?.paperCount ?? 0)}
+            />
+            <EvidenceMetric
+              label={locale === "ko" ? "평가 항목" : "eval passes"}
+              value={`${realPaperRun?.evaluationPassed ?? 0}/${realPaperRun?.evaluationTotal ?? 0}`}
+            />
+            <EvidenceMetric
+              label={locale === "ko" ? "모델 추적" : "model traces"}
+              value={`${traces?.modelCount ?? 0}/${traces?.total ?? 0}`}
+            />
+            <EvidenceMetric
+              label={locale === "ko" ? "폴백" : "fallbacks"}
+              value={String(traces?.fallbackCount ?? 0)}
+            />
+            <EvidenceMetric
+              label={locale === "ko" ? "프론트 파일" : "frontend files"}
+              value={String(frontendExport?.fileCount ?? 0)}
+            />
+          </div>
+          <div className="mt-4 space-y-2 text-[11px] leading-5 text-text-muted">
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "검증 논문" : "Papers"}:</span> {papers.length > 0 ? papers.join(" · ") : locale === "ko" ? "없음" : "n/a"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "처리 범위" : "Scope"}:</span> {scope}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "중간 배치 근거 테스트" : "Long context"}:</span> {litm?.target_span_id || (locale === "ko" ? "없음" : "n/a")} · {litm?.context_chars ?? 0} {locale === "ko" ? "글자" : "chars"} · {litmRatio}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "근거 span ID" : "Evidence IDs"}:</span> {evidenceOk ? (locale === "ko" ? "검증됨" : "verified") : locale === "ko" ? "재실행 필요" : "rerun needed"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "확장 아이디어 루프" : "Growth loop"}:</span> {growthLoopOk ? (locale === "ko" ? "선택 문장, 실행 기록, 이전 아이디어 메모 연결 확인" : "paper + run:r1 + prior idea") : locale === "ko" ? "재실행 필요" : "rerun needed"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "미니 실험 코드" : "Mini-lab code"}:</span> {starterOk ? (locale === "ko" ? "논문 근거 행으로 실행 확인" : "source-evidence run verified") : locale === "ko" ? "재실행 필요" : "rerun needed"}</p>
+          </div>
+        </div>
 
-      <div className="mt-4 grid gap-2 text-[11px] text-text-muted sm:grid-cols-4">
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "논문" : "Papers"}:
-          </span>{" "}
-          {papers.length > 0 ? papers.join(" · ") : "n/a"}
-        </p>
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "범위" : "Scope"}:
-          </span>{" "}
-          {scope}
-        </p>
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "근거 ID" : "Evidence IDs"}:
-          </span>{" "}
-          {evidenceOk ? "verified" : "rerun needed"}
-        </p>
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "긴 문맥" : "Long context"}:
-          </span>{" "}
-          {litm?.target_span_id || "n/a"} · {litm?.context_chars ?? 0} chars · {litmRatio} offset
-        </p>
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "Growth 루프" : "Growth loop"}:
-          </span>{" "}
-          {growthLoopOk ? "paper + run:r1 + prior idea" : "rerun needed"}
-        </p>
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "Mini-lab 코드" : "Mini-lab code"}:
-          </span>{" "}
-          {starterOk ? "compile + run smoke" : "rerun needed"}
-        </p>
-      </div>
+        <div className="rounded-2xl border border-border bg-surface-secondary/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-text-primary">
+              {locale === "ko" ? "현재 데모 선택 span 증거" : "Current selected-span proof"}
+            </p>
+            <span
+              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                localProofOk ? "bg-emerald-100 text-emerald-800" : "bg-yellow-100 text-yellow-800"
+              }`}
+            >
+              {localProofOk
+                ? locale === "ko"
+                  ? "리더 증거 묶음 일치"
+                  : "reader proof coherent"
+                : locale === "ko"
+                  ? "데모 proof 재생성 필요"
+                  : "demo proof needs refresh"}
+            </span>
+          </div>
+          <div className="space-y-2 text-[11px] leading-5 text-text-muted">
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "선택 문장" : "Selected span"}:</span> {localDemo?.selectedSpanId || (locale === "ko" ? "없음" : "n/a")}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "근거 구간" : "Evidence window"}:</span> {localDemo?.evidenceWindow || (locale === "ko" ? "없음" : "n/a")} · {localDemo?.quoteCount ?? 0} {locale === "ko" ? "개 인용" : "quotes"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "답변 추적" : "Answer trace"}:</span> {localDemo?.traceIdsPassed ? (locale === "ko" ? "실모델 추적 확인" : "model trace verified") : locale === "ko" ? "추적 재확인 필요" : "trace check needed"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "번역 연결" : "Translation binding"}:</span> {localDemo?.translationSourceConsistent ? (locale === "ko" ? "현재 소스 인덱스와 일치" : "source-index matched") : locale === "ko" ? "재번역 또는 재검증 필요" : "rerun or retranslate needed"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "현재 소스 인덱스" : "Source index"}:</span> {basename(localDemo?.sourceIndexPath) || (locale === "ko" ? "없음" : "n/a")}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "증거 파일 묶음" : "Artifact bundle"}:</span> {localDemo?.artifactBundleCoherent ? (locale === "ko" ? "같은 문장 기준으로 정렬됨" : "same-span bundle") : locale === "ko" ? "섞인 artifact 가능성" : "possible mixed artifacts"}</p>
+          </div>
+        </div>
 
-      <div className="mt-4 grid gap-3 text-xs text-text-secondary sm:grid-cols-3">
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "선택 span 근거" : "Selected-span proof"}:
-          </span>{" "}
-          {localDemo?.selectedSpanId || "n/a"} · {localDemo?.evidenceWindow || "no window"} ·{" "}
-          {localDemo?.quoteCount ?? 0} quotes
-          {localDemo?.sourceIndexConsistent === false ? " · rerun needed" : ""}
-        </p>
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "메모리" : "Memory"}:
-          </span>{" "}
-          {memory?.recordCount ?? 0} records across {memory?.paperCount ?? 0} papers
-        </p>
-        <p>
-          <span className="font-semibold text-text-primary">
-            {locale === "ko" ? "파인튜닝" : "Fine-tuning"}:
-          </span>{" "}
-          {fineTuning}
-        </p>
+        <div className="rounded-2xl border border-border bg-surface-secondary/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-text-primary">
+              {locale === "ko" ? "운영 판단" : "Operational readout"}
+            </p>
+            <span className="rounded-full bg-surface px-2.5 py-1 text-[10px] font-semibold text-text-secondary">
+              {realPaperRun?.artifactDate || (locale === "ko" ? "날짜 없음" : "no date")}
+            </span>
+          </div>
+          <div className="space-y-2 text-[11px] leading-5 text-text-muted">
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "메모리" : "Memory"}:</span> {locale === "ko" ? `${memory?.recordCount ?? 0}개 기록 / ${memory?.paperCount ?? 0}개 논문` : `${memory?.recordCount ?? 0} records across ${memory?.paperCount ?? 0} papers`}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "파인튜닝" : "Fine-tuning"}:</span> {fineTuningLabel}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "추적 계약" : "Trace contract"}:</span> {traces?.traceIdsPassed ? (locale === "ko" ? "필수 추적 ID 확인" : "required trace ids verified") : locale === "ko" ? "누락 추적 있음" : "trace gaps found"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "프론트 배포 산출물" : "Frontend artifact"}:</span> {frontendExportLabel} · {frontendExport?.hasReader ? "reader" : locale === "ko" ? "reader 누락" : "reader missing"} · {frontendExport?.hasReaderChunk ? "chunk" : locale === "ko" ? "chunk 누락" : "chunk missing"}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "정적 export 크기" : "Static export size"}:</span> {formatBytes(frontendExport?.totalBytes ?? 0)}</p>
+            <p><span className="font-semibold text-text-primary">{locale === "ko" ? "판단 기준" : "What this means"}:</span> {summary.ok ? (locale === "ko" ? "현재 저장된 검증 묶음은 데모 기준을 통과했습니다." : "The current stored validation bundle clears the demo bar.") : locale === "ko" ? "적어도 한 축에서 저장된 증거를 다시 생성해야 합니다." : "At least one proof axis needs to be regenerated."}</p>
+          </div>
+        </div>
       </div>
 
       {summary.warnings.length > 0 && (
@@ -468,4 +544,17 @@ function EvidenceMetric({ label, value }: { label: string; value: string }) {
       <p className="mt-0.5 text-[11px] text-text-muted">{label}</p>
     </div>
   );
+}
+
+function basename(value: string | undefined): string {
+  if (!value) return "";
+  const parts = value.split("/");
+  return parts[parts.length - 1] || value;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

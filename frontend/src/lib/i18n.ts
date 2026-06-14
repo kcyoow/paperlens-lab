@@ -13,6 +13,7 @@ interface LandingText {
   arxivHint: string;
   pastePlaceholder: string;
   startButton: string;
+  loadingPaper: string;
   noInputError: string;
   features: {
     sourceCompare: { title: string; desc: string };
@@ -28,6 +29,9 @@ interface ReaderText {
   noPaperTitle: string;
   noPaperDescription: string;
   backToStart: string;
+  translationStatusLabel: string;
+  translationStatusRunning: string;
+  translationStatusReady: string;
 }
 
 interface AnnotationText {
@@ -49,14 +53,20 @@ interface RightPanelText {
   selectedSentence: string;
   koreanTranslation: string;
   englishSource: string;
-  reportTranslation: string;
   retranslate: string;
+  retranslating: string;
   emptyTranslated: string;
   emptyGeneric: string;
+  qaReadyTitle: string;
   qaEmptyTitle: string;
   qaEmptyHint: string;
   me: string;
+  qaScopeSelected: string;
+  qaScopePaper: string;
+  paperScopeTitle: string;
+  paperScopeHint: string;
   askPlaceholder: string;
+  askPaperPlaceholder: string;
   selectFirstPlaceholder: string;
   backendErrorResponse: string;
 }
@@ -72,15 +82,15 @@ interface LabText {
   metric: string;
   failureCondition: string;
   ablation: string;
-  toyDataset: string;
+  evidenceSource: string;
   todos: string;
-  smokeTestIncluded: string;
+  sourceRunIncluded: string;
   copy: string;
   copied: string;
-  runSmoke: string;
-  runningSmoke: string;
-  smokePassed: string;
-  smokeFailed: string;
+  runWithSource: string;
+  runningWithSource: string;
+  sourceRunPassed: string;
+  sourceRunFailed: string;
   runMiniLab: string;
   runningMiniLab: string;
   miniLabPassed: string;
@@ -124,6 +134,7 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       arxivHint: "Enter an arXiv ID or full URL",
       pastePlaceholder: "Paste paper text here...",
       startButton: "Start reading",
+      loadingPaper: "Loading paper...",
       noInputError: "Add a PDF, arXiv URL, or pasted paper text before opening the reader.",
       features: {
         sourceCompare: {
@@ -151,6 +162,9 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       noPaperTitle: "No paper loaded",
       noPaperDescription: "Start from a PDF, arXiv URL, or pasted paper text so the reader is grounded in a real source.",
       backToStart: "Back to start",
+      translationStatusLabel: "KO translation",
+      translationStatusRunning: "background sync",
+      translationStatusReady: "ready",
     },
     annotation: {
       tools: {
@@ -175,16 +189,22 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       selectedSentence: "Selected sentence",
       koreanTranslation: "Korean translation",
       englishSource: "English source",
-      reportTranslation: "Report issue",
       retranslate: "Retranslate",
+      retranslating: "Retranslating...",
       emptyTranslated:
         "Click a Korean translation to inspect the English source here",
       emptyGeneric: "Click a sentence to compare source and translation",
+      qaReadyTitle: "Ask about this selected sentence",
       qaEmptyTitle: "Select a sentence and ask a question",
       qaEmptyHint: "Answers stay linked to the source line",
       me: "Me",
+      qaScopeSelected: "Selected",
+      qaScopePaper: "Paper",
+      paperScopeTitle: "Ask about the paper",
+      paperScopeHint: "Answers cite indexed paper evidence",
       askPlaceholder: "Ask about the selected sentence...",
-      selectFirstPlaceholder: "Select a sentence first",
+      askPaperPlaceholder: "Ask about the whole paper...",
+      selectFirstPlaceholder: "Ask about the whole paper, or select text first",
       backendErrorResponse:
         "The backend could not return a source-grounded answer. Try again after the model/API connection is healthy.",
     },
@@ -199,21 +219,21 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       metric: "Metric",
       failureCondition: "Failure condition",
       ablation: "Ablation",
-      toyDataset: "Toy dataset",
+      evidenceSource: "Evidence source",
       todos: "runnable",
-      smokeTestIncluded: "smoke test included",
+      sourceRunIncluded: "source-bound run",
       copy: "Copy",
       copied: "Copied",
-      runSmoke: "Run smoke",
-      runningSmoke: "Running...",
-      smokePassed: "Smoke passed",
-      smokeFailed: "Smoke failed",
+      runWithSource: "Run with source",
+      runningWithSource: "Running with source...",
+      sourceRunPassed: "Source run passed",
+      sourceRunFailed: "Source run failed",
       runMiniLab: "Run mini-lab",
       runningMiniLab: "Running mini-lab...",
       miniLabPassed: "Mini-lab passed",
       miniLabFailed: "Mini-lab failed",
       reviewWarning:
-        "Review generated code before expanding it beyond the built-in smoke test.",
+        "Review generated code against the indexed paper evidence before expanding it.",
       close: "Close",
       download: "Download",
     },
@@ -229,7 +249,7 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
         "PDF나 논문을 넣으면 영어 원문을 기본으로 읽고, 필요할 때 한국어 번역과 대조하며, 밑줄 치고 질문하고, 흥미로운 아이디어를 실제 실험으로 바꿀 수 있습니다.",
       tabs: {
         upload: "PDF 업로드",
-        arxiv: "arXiv URL",
+        arxiv: "arXiv 주소",
         paste: "텍스트 붙여넣기",
       },
       uploadPrimary: "PDF 파일을 여기에 드래그하거나",
@@ -238,7 +258,8 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       arxivHint: "arXiv ID 또는 전체 URL을 입력하세요",
       pastePlaceholder: "논문 텍스트를 붙여넣으세요...",
       startButton: "논문 읽기 시작",
-      noInputError: "리더를 열기 전에 PDF, arXiv URL, 또는 논문 텍스트를 넣어주세요.",
+      loadingPaper: "논문 불러오는 중...",
+      noInputError: "리더를 열기 전에 PDF, arXiv 주소, 또는 논문 텍스트를 넣어주세요.",
       features: {
         sourceCompare: {
           title: "원문-번역 대조",
@@ -250,10 +271,10 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
         },
         experiment: {
           title: "실험해보기",
-          desc: "흥미로운 claim을 mini-test로 바꿔봅니다",
+          desc: "흥미로운 주장이나 결과를 작은 검증 실험으로 바꿔봅니다",
         },
       },
-      tagline: "Read the paper. Trace the source. Try the idea.",
+      tagline: "논문을 읽고, 근거를 추적하고, 아이디어를 실험하세요.",
     },
     reader: {
       viewModes: {
@@ -265,6 +286,9 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       noPaperTitle: "불러온 논문이 없습니다",
       noPaperDescription: "실제 원문에 근거한 리더를 열려면 PDF, arXiv URL, 또는 논문 텍스트부터 넣어주세요.",
       backToStart: "처음으로",
+      translationStatusLabel: "한국어 번역",
+      translationStatusRunning: "백그라운드 진행 중",
+      translationStatusReady: "준비 완료",
     },
     annotation: {
       tools: {
@@ -289,44 +313,50 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       selectedSentence: "선택된 문장",
       koreanTranslation: "한국어 번역",
       englishSource: "영어 원문",
-      reportTranslation: "번역 이상함",
       retranslate: "다시 번역",
+      retranslating: "다시 번역 중...",
       emptyTranslated: "번역문을 클릭하면 영어 원문이 여기에 표시됩니다",
       emptyGeneric: "문장을 클릭하면 대조 정보가 표시됩니다",
+      qaReadyTitle: "선택한 문장에 대해 질문해보세요",
       qaEmptyTitle: "문장을 선택하고 질문해보세요",
       qaEmptyHint: "답변은 원문 근거와 함께 표시됩니다",
       me: "나",
+      qaScopeSelected: "선택",
+      qaScopePaper: "논문",
+      paperScopeTitle: "논문 전체에 질문",
+      paperScopeHint: "답변은 색인된 논문 근거를 인용합니다",
       askPlaceholder: "선택한 문장에 대해 질문...",
-      selectFirstPlaceholder: "먼저 문장을 선택하세요",
+      askPaperPlaceholder: "논문 전체에 대해 질문...",
+      selectFirstPlaceholder: "논문 전체에 대해 묻거나, 먼저 텍스트를 선택하세요",
       backendErrorResponse:
         "백엔드가 원문 근거가 묶인 답변을 반환하지 못했습니다. 모델/API 연결이 정상인지 확인한 뒤 다시 시도해주세요.",
     },
     lab: {
       subtitle: "선택한 문장을 실험으로 바꿉니다",
       selectedSource: "선택한 원문",
-      paperSays: "Paper says",
+      paperSays: "논문 근거",
       interpretation: "우리의 해석",
       unsupportedAssumption: "논문 밖 가정",
-      hypothesis: "Hypothesis",
-      baseline: "Baseline",
-      metric: "Metric",
-      failureCondition: "Failure condition",
-      ablation: "Ablation",
-      toyDataset: "Toy dataset",
+      hypothesis: "가설",
+      baseline: "기준선",
+      metric: "평가 지표",
+      failureCondition: "실패 조건",
+      ablation: "제거 실험",
+      evidenceSource: "원문 근거",
       todos: "실행 가능",
-      smokeTestIncluded: "smoke-test 포함",
+      sourceRunIncluded: "원문 근거 실행",
       copy: "복사",
       copied: "복사됨",
-      runSmoke: "smoke 실행",
-      runningSmoke: "실행 중...",
-      smokePassed: "smoke 통과",
-      smokeFailed: "smoke 실패",
-      runMiniLab: "mini-lab 실행",
-      runningMiniLab: "mini-lab 실행 중...",
-      miniLabPassed: "mini-lab 통과",
-      miniLabFailed: "mini-lab 실패",
+      runWithSource: "원문 근거로 실행",
+      runningWithSource: "원문 근거로 실행 중...",
+      sourceRunPassed: "원문 실행 통과",
+      sourceRunFailed: "원문 실행 실패",
+      runMiniLab: "미니 실험 실행",
+      runningMiniLab: "미니 실험 실행 중...",
+      miniLabPassed: "미니 실험 통과",
+      miniLabFailed: "미니 실험 실패",
       reviewWarning:
-        "내장 smoke test 밖으로 확장하기 전에는 생성 코드를 반드시 검토하세요.",
+        "확장하기 전에 생성 코드가 인덱싱된 논문 근거에서 어떻게 동작하는지 검토하세요.",
       close: "닫기",
       download: "다운로드",
     },
