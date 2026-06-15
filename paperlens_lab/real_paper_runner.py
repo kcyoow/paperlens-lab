@@ -1,0 +1,1091 @@
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from .ingest import PaperSource, build_source
+from .memory_store import append_memory, load_memories, paper_key
+from .mini_lab import build_evidence_rows
+from .model_adapter import DEFAULT_MODEL, DEFAULT_PROVIDER, QUALITY_MODEL, TRANSLATION_MODEL, ModelGateway, evidence_map
+from .scenario_eval import (
+    EvalResult,
+    FailureRecord,
+    evaluate_experiment_spec,
+    evaluate_grounded_qa,
+    evaluate_growth_ideas,
+    evaluate_starter_code,
+    evaluate_translation,
+    fine_tuning_gate,
+)
+from .server import paper_document_from_source
+
+
+DEFAULT_OUTPUT_DIR = Path("outputs") / "real_paper_validation"
+
+
+@dataclass(frozen=True)
+class RealPaperCase:
+    name: str
+    arxiv: str
+    question: str
+    idea: str
+
+
+DEFAULT_REAL_PAPERS = [
+    RealPaperCase(
+        name="attention_is_all_you_need",
+        arxiv="1706.03762",
+        question="What exactly does this selected span claim, and what should not be inferred beyond it?",
+        idea="Turn one highlighted Transformer mechanism into a 30-minute comparison against a simpler sequence baseline.",
+    ),
+    RealPaperCase(
+        name="retrieval_augmented_generation",
+        arxiv="2005.11401",
+        question="What is the selected span's concrete method or result, and what evidence would be missing for a broader claim?",
+        idea="Build a source-evidence retrieval-plus-generation ablation using indexed spans from this paper.",
+    ),
+    RealPaperCase(
+        name="lora",
+        arxiv="2106.09685",
+        question="Does this selected span justify fine-tuning, prompting, or only a narrower adapter-style test?",
+        idea="Compare a prompting baseline with an adapter-style source-evidence probe tied to this paper.",
+    ),
+]
+
+
+def run_real_paper_case(
+    case: RealPaperCase,
+    *,
+    source: PaperSource | None = None,
+    gateway: ModelGateway | None = None,
+    use_model: bool = False,
+    max_pdf_pages: int = 8,
+    max_translate_spans: int = 12,
+    max_reader_spans: int = 180,
+    locale: str = "ko",
+    output_dir: str | Path | None = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    gateway = gateway or ModelGateway()
+    source = source or build_source(
+        uploaded_pdf=None,
+        arxiv_or_url=case.arxiv,
+        pasted_text="",
+        max_pdf_pages=max_pdf_pages,
+    )
+    document = paper_document_from_source(
+        source,
+        use_model=use_model,
+        max_translate_spans=max_translate_spans,
+        max_reader_spans=max_reader_spans,
+        gateway=gateway,
+    )
+    spans = _flatten_reader_spans(document)
+    selected = _selected_spans(spans)
+    paper_id = paper_key(document["id"] or document["title"])
+
+    translations = gateway.translate_spans(
+        document["title"],
+        [{"span_id": item["id"], "text": item["original"]} for item in selected],
+        locale=locale,
+        use_model=use_model,
+    )
+    translation_by_id = {
+        item.get("span_id", ""): item.get("translation", "")
+        for item in translations.data.get("translations", [])
+        if isinstance(item, dict)
+    }
+
+    qa_runs = []
+    for item in selected:
+        source_evidence = evidence_map(source.text, item["original"], span_id=item["id"])
+        qa = gateway.answer_span(
+            paper_title=document["title"],
+            span_id=item["id"],
+            selected_span=item["original"],
+            translated_span=translation_by_id.get(item["id"], item.get("translated", "")),
+            question=f"{case.question} Use the selected span id {item['id']} as the primary evidence.",
+            source_text=source.text,
+            locale=locale,
+            use_model=use_model,
+        )
+        qa_runs.append(
+            {
+                "position": item["position"],
+                "span": item,
+                "source_evidence": source_evidence,
+                "result": _public_result(qa),
+            }
+        )
+
+    litm_probe = _run_adversarial_litm_probe(
+        case=case,
+        document_title=document["title"],
+        spans=spans,
+        gateway=gateway,
+        use_model=use_model,
+        locale=locale,
+    )
+
+    selected_middle = selected[len(selected) // 2] if selected else {}
+    selected_middle_text = str(selected_middle.get("original") or "")
+    selected_middle_id = str(selected_middle.get("id") or "")
+
+    experiment = gateway.experiment_spec(
+        paper_title=document["title"],
+        selected_span=selected_middle_text,
+        translated_span=translation_by_id.get(selected_middle_id, "") if selected else "",
+        source_text=source.text,
+        idea=case.idea,
+        locale=locale,
+        use_model=use_model,
+    )
+    starter = gateway.starter_code(
+        paper_title=document["title"],
+        selected_span=selected_middle_text,
+        source_text=source.text,
+        experiment_spec=experiment.data if isinstance(experiment.data, dict) else {},
+        locale=locale,
+        use_model=use_model,
+    )
+    starter_code = str(starter.data.get("code") or starter.text or "")
+    starter_evidence_rows = build_evidence_rows(
+        paper_id=document["id"],
+        span_id=selected_middle_id,
+        selected_span=selected_middle_text,
+    )
+
+    append_memory(
+        paper_id,
+        kind="paper_span",
+        payload={
+            "paper_title": document["title"],
+            "summary": selected[len(selected) // 2]["original"] if selected else "",
+        },
+        evidence_id="paper:selected-middle",
+    )
+    append_memory(
+        paper_id,
+        kind="mini_lab_result",
+        payload={"paper_title": document["title"], "summary": experiment.text[:1200]},
+        evidence_id="run:r1",
+    )
+    memories = load_memories(paper_id)
+    growth = gateway.growth_ideas(
+        paper_title=document["title"],
+        paper_memory=memories,
+        mini_lab_result=experiment.text,
+        selected_span=selected[len(selected) // 2]["original"] if selected else "",
+        locale=locale,
+        use_model=use_model,
+    )
+    for idea in growth.data.get("ideas", []):
+        append_memory(
+            paper_id,
+            kind="growth_idea",
+            payload={"paper_title": document["title"], "idea": idea},
+        )
+    iteration_memories = load_memories(paper_id)
+    growth_iteration = gateway.growth_ideas(
+        paper_title=document["title"],
+        paper_memory=iteration_memories,
+        mini_lab_result=(
+            f"{experiment.text}\n\n"
+            "Follow-up observation: the first mini-lab result should be narrowed into a second test "
+            "that uses both the paper span and the previous growth idea as evidence."
+        ),
+        selected_span=selected[len(selected) // 2]["original"] if selected else "",
+        locale=locale,
+        use_model=use_model,
+    )
+    for idea in growth_iteration.data.get("ideas", []):
+        append_memory(
+            paper_id,
+            kind="growth_iteration_idea",
+            payload={"paper_title": document["title"], "idea": idea},
+        )
+
+    evals = [
+        evaluate_pdf_parse(source, document, spans),
+        *_evaluate_run(
+            selected,
+            translations.data,
+            qa_runs,
+            experiment.data,
+            starter_code,
+            starter_evidence_rows,
+            growth.data,
+            memories,
+            litm_probe,
+            growth_iteration.data,
+            iteration_memories,
+        ),
+    ]
+    if use_model:
+        evals.append(
+            evaluate_model_backing(
+                translations,
+                qa_runs,
+                experiment,
+                starter,
+                growth,
+                litm_probe,
+                growth_iteration,
+            )
+        )
+    failures = _failure_records(
+        case.name,
+        evals,
+        translations,
+        qa_runs,
+        experiment,
+        starter,
+        growth,
+        litm_probe,
+        growth_iteration,
+    )
+    result = {
+        "case": asdict(case),
+        "passed": all(item.passed for item in evals),
+        "source": {
+            "title": source.title,
+            "authors": source.authors,
+            "source_label": source.source_label,
+            "pdf_url": source.pdf_url,
+            "text_chars": len(source.text),
+            "word_count": len(source.text.split()),
+            "page_marker_count": source.text.count("[page "),
+        },
+        "reader": {
+            "document_id": document["id"],
+            "metadata": document.get("metadata", {}),
+            "visible_span_count": len(spans),
+            "selected_span_positions": [
+                {
+                    "position": item["position"],
+                    "position_label": item.get("position_label", ""),
+                    "span_id": item["id"],
+                    "chars": len(item["original"]),
+                }
+                for item in selected
+            ],
+            "adversarial_litm": litm_probe.get("stats", {}),
+        },
+        "evaluations": [asdict(item) for item in evals],
+        "fine_tuning": fine_tuning_gate(failures) if use_model else _no_model_fine_tuning_decision(),
+        "failure_records": [asdict(item) for item in failures],
+        "model_outputs": {
+            "translation": _public_result(translations),
+            "qa": qa_runs,
+            "adversarial_litm": litm_probe,
+            "experiment": _public_result(experiment),
+            "starter_code": _public_result(starter),
+            "growth": _public_result(growth),
+            "growth_iteration": _public_result(growth_iteration),
+        },
+        "memory": {
+            "paper_id": paper_id,
+            "records_before_growth": len(memories),
+            "records_before_growth_iteration": len(iteration_memories),
+            "records_after_growth": len(load_memories(paper_id)),
+        },
+    }
+    if output_dir is not None:
+        _write_result(Path(output_dir), case.name, result)
+    return result
+
+
+def run_real_papers(
+    cases: list[RealPaperCase] | None = None,
+    *,
+    gateway: ModelGateway | None = None,
+    use_model: bool = False,
+    max_pdf_pages: int = 8,
+    max_translate_spans: int = 12,
+    max_reader_spans: int = 180,
+    output_dir: str | Path | None = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    selected_cases = cases or DEFAULT_REAL_PAPERS
+    runs = [
+        run_real_paper_case(
+            case,
+            gateway=gateway,
+            use_model=use_model,
+            max_pdf_pages=max_pdf_pages,
+            max_translate_spans=max_translate_spans,
+            max_reader_spans=max_reader_spans,
+            output_dir=output_dir,
+        )
+        for case in selected_cases
+    ]
+    failures = [
+        FailureRecord(
+            task=str(record.get("task", "unknown")),
+            label=str(record.get("label", "")),
+            scenario_id=str(record.get("scenario_id", run["case"]["name"])),
+            model=str(record.get("model", "unknown")),
+            severity=str(record.get("severity", "medium")),
+            root_cause=str(record.get("root_cause", "unknown")),
+            fix_attempted=bool(record.get("fix_attempted")),
+        )
+        for run in runs
+        for record in run.get("failure_records", [])
+        if isinstance(record, dict)
+    ]
+    summary = {
+        "passed": all(run["passed"] for run in runs),
+        "paper_count": len(runs),
+        "fine_tuning": fine_tuning_gate(failures) if use_model else _no_model_fine_tuning_decision(),
+        "runs": runs,
+    }
+    if output_dir is not None:
+        _write_result(Path(output_dir), "summary", summary)
+    return summary
+
+
+def _flatten_reader_spans(document: dict[str, Any]) -> list[dict[str, Any]]:
+    spans: list[dict[str, Any]] = []
+    for section in document.get("sections", []):
+        for paragraph in section.get("paragraphs", []):
+            for span in paragraph.get("spans", []):
+                spans.append(
+                    {
+                        "id": span.get("id", ""),
+                        "original": span.get("original", ""),
+                        "translated": span.get("translated", ""),
+                        "position": len(spans),
+                    }
+                )
+    return spans
+
+
+def _run_adversarial_litm_probe(
+    *,
+    case: RealPaperCase,
+    document_title: str,
+    spans: list[dict[str, Any]],
+    gateway: ModelGateway,
+    use_model: bool,
+    locale: str,
+) -> dict[str, Any]:
+    selected = _selected_spans(spans)
+    target = next((item for item in selected if item.get("position_label") == "middle"), selected[0] if selected else {})
+    target_phrase = _target_phrase(str(target.get("original", "")))
+    evidence, source_evidence, stats = _build_litm_context(spans, target, target_phrase)
+    question = (
+        f"긴 evidence packet 안에서 exact phrase `{target_phrase}`를 포함하는 source_id를 찾아줘. "
+        "그 문장이 무엇을 뒷받침하는지 말하고, 이것만으로 전체 논문 성능 우위나 fine-tuning 필요성이 증명되는지도 판단해줘."
+        if locale == "ko"
+        else (
+            f"Find the source_id in the long evidence packet that contains the exact phrase `{target_phrase}`. "
+            "Explain what that item supports, and whether this alone proves full-paper superiority or a fine-tuning need."
+        )
+    )
+    result = gateway.answer_evidence_probe(
+        paper_title=document_title,
+        question=question,
+        target_span_id=str(target.get("id", "")),
+        target_phrase=target_phrase,
+        evidence_items=evidence,
+        locale=locale,
+        use_model=use_model,
+    )
+    return {
+        "question": question,
+        "source_evidence": source_evidence,
+        "stats": stats,
+        "result": _public_result(result),
+    }
+
+
+def _build_litm_context(
+    spans: list[dict[str, Any]],
+    target: dict[str, Any],
+    target_phrase: str,
+    *,
+    min_chars: int = 8000,
+    max_chars: int = 14000,
+    min_spans: int = 60,
+) -> tuple[list[dict[str, str]], dict[str, str], dict[str, Any]]:
+    if not spans:
+        return [], {}, {
+            "context_span_count": 0,
+            "context_chars": 0,
+            "target_span_id": "",
+            "target_phrase": target_phrase,
+            "target_char_offset_ratio": 0,
+            "target_position_ratio": 0,
+            "foregrounded_selected_span": False,
+            "distractor_count": 0,
+            "target_phrase_non_target_count": 0,
+        }
+
+    target_position = int(target.get("position") if target.get("position") is not None else len(spans) // 2)
+    target_position = max(0, min(target_position, len(spans) - 1))
+    start = target_position
+    end = target_position + 1
+    before_chars = 0
+    after_chars = 0
+
+    def span_chars(index: int) -> int:
+        return len(str(spans[index].get("original", ""))) + 1
+
+    while True:
+        current_chars = sum(span_chars(index) for index in range(start, end))
+        current_count = end - start
+        if current_chars >= min_chars and current_count >= min_spans:
+            break
+        if current_chars >= max_chars and current_count >= min_spans:
+            break
+        can_left = start > 0
+        can_right = end < len(spans)
+        if not can_left and not can_right:
+            break
+        if (before_chars <= after_chars and can_left) or not can_right:
+            start -= 1
+            before_chars += span_chars(start)
+        else:
+            after_chars += span_chars(end)
+            end += 1
+
+    context_spans = spans[start:end]
+    evidence = []
+    merged_count = 0
+    target_span_id = str(spans[target_position].get("id", ""))
+    for index, item in enumerate(context_spans):
+        if not item.get("id") or not item.get("original"):
+            continue
+        item_id = str(item.get("id", ""))
+        text, merged = (
+            _evidence_chunk_text(context_spans, index)
+            if item_id == target_span_id
+            else (str(item.get("original", "")).strip(), False)
+        )
+        if merged:
+            merged_count += 1
+        evidence.append({"source_id": item_id, "text": text})
+    source_evidence = {item["source_id"]: item["text"] for item in evidence}
+    context_chars = sum(len(item["text"]) + 1 for item in evidence)
+    chars_before_target = 0
+    target_item_index = 0
+    for index, item in enumerate(evidence):
+        if item["source_id"] == target_span_id:
+            target_item_index = index
+            break
+        chars_before_target += len(item["text"]) + 1
+    target_text = source_evidence.get(target_span_id, "")
+    target_center = chars_before_target + (len(target_text) / 2)
+    non_target_phrase_count = sum(
+        1
+        for item in evidence
+        if item["source_id"] != target_span_id and target_phrase and target_phrase in item["text"]
+    )
+    stats = {
+        "context_span_count": len(evidence),
+        "context_chars": context_chars,
+        "target_span_id": target_span_id,
+        "target_phrase": target_phrase,
+        "target_item_index": target_item_index,
+        "target_position_ratio": target_item_index / max(len(evidence) - 1, 1),
+        "target_char_offset_ratio": target_center / max(context_chars, 1),
+        "foregrounded_selected_span": False,
+        "distractor_count": max(len(evidence) - 1, 0),
+        "target_phrase_in_target": bool(target_phrase and target_phrase in target_text),
+        "target_phrase_non_target_count": non_target_phrase_count,
+        "merged_context_items": merged_count,
+        "context_start_span_id": evidence[0]["source_id"] if evidence else "",
+        "context_end_span_id": evidence[-1]["source_id"] if evidence else "",
+    }
+    return evidence, source_evidence, stats
+
+
+def _evidence_chunk_text(context_spans: list[dict[str, Any]], index: int) -> tuple[str, bool]:
+    text = str(context_spans[index].get("original", "")).strip()
+    if not text:
+        return "", False
+    parts = [text]
+    cursor = index
+    while len(parts) < 3 and _looks_like_continued_fragment(parts[-1]) and cursor + 1 < len(context_spans):
+        next_text = str(context_spans[cursor + 1].get("original", "")).strip()
+        if not next_text or _looks_like_section_heading(next_text):
+            break
+        parts.append(next_text)
+        cursor += 1
+    return " ".join(parts), len(parts) > 1
+
+
+def _looks_like_continued_fragment(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    lower_tail = stripped.split()[-1].strip(" ,.;:").lower() if stripped.split() else ""
+    weak_endings = {"a", "an", "and", "as", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}
+    if lower_tail in weak_endings:
+        return True
+    return stripped[-1] not in {".", "?", "!", ":", ")"}
+
+
+def _looks_like_section_heading(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.lower().startswith(("figure ", "table ")):
+        return True
+    return bool(stripped[0].isdigit() and len(stripped.split()) <= 8)
+
+
+def _target_phrase(text: str, *, max_words: int = 10, min_words: int = 6) -> str:
+    cleaned = " ".join(str(text).split())
+    if not cleaned:
+        return ""
+    words = cleaned.split()
+    if len(words) <= max_words:
+        return _trim_phrase_ending(cleaned, min_words=min_words)
+    for index in range(0, max(1, len(words) - max_words + 1)):
+        candidate = " ".join(words[index : index + max_words]).strip(" ,.;:")
+        if any(char.isdigit() for char in candidate) or any(char.isupper() for char in candidate):
+            return _trim_phrase_ending(candidate, min_words=min_words)
+    return _trim_phrase_ending(" ".join(words[:max_words]).strip(" ,.;:"), min_words=min_words)
+
+
+def _trim_phrase_ending(phrase: str, *, min_words: int) -> str:
+    words = phrase.split()
+    weak_endings = {
+        "a",
+        "an",
+        "and",
+        "as",
+        "by",
+        "for",
+        "from",
+        "in",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+    }
+    while len(words) > min_words and words[-1].strip(" ,.;:").lower() in weak_endings:
+        words.pop()
+    return " ".join(words).strip(" ,.;:")
+
+
+def _selected_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(spans) <= 3:
+        return [{**span, "position_label": f"span-{index + 1}"} for index, span in enumerate(spans)]
+    anchors = [
+        ("front", max(0, len(spans) // 10)),
+        ("middle", len(spans) // 2),
+        ("end", max(0, len(spans) - 2)),
+    ]
+    selected = []
+    seen = set()
+    for label, anchor in anchors:
+        position = _nearest_informative_position(spans, anchor, seen)
+        if position in seen:
+            continue
+        seen.add(position)
+        selected.append({**spans[position], "position_label": label})
+    return selected
+
+
+def _nearest_informative_position(spans: list[dict[str, Any]], anchor: int, seen: set[int]) -> int:
+    window = max(12, min(36, len(spans) // 5))
+    start = max(0, anchor - window)
+    end = min(len(spans), anchor + window + 1)
+    candidates = [position for position in range(start, end) if position not in seen]
+    if not candidates:
+        return min(anchor, len(spans) - 1)
+    return max(
+        candidates,
+        key=lambda position: (_span_information_score(spans[position]), -abs(position - anchor), -position),
+    )
+
+
+def _span_information_score(span: dict[str, Any]) -> float:
+    text = str(span.get("original", "")).strip()
+    lower = text.lower()
+    length = len(text)
+    score = min(length, 240) / 60
+    if length < 45:
+        score -= 3
+    if length > 420:
+        score -= 1
+    for marker in (
+        "we ",
+        "propose",
+        "show",
+        "result",
+        "experiment",
+        "method",
+        "model",
+        "baseline",
+        "metric",
+        "limitation",
+        "improve",
+        "reduce",
+        "increase",
+    ):
+        if marker in lower:
+            score += 1
+    if any(char.isdigit() for char in text):
+        score += 1
+    if any(char.isupper() for char in text):
+        score += 0.5
+    if lower.startswith(("table ", "figure ", "fig. ", "http", "www.")):
+        score -= 2
+    if "@" in text or "copyright" in lower or "permission" in lower:
+        score -= 3
+    return score
+
+
+def _evaluate_run(
+    selected: list[dict[str, Any]],
+    translation_data: dict[str, Any],
+    qa_runs: list[dict[str, Any]],
+    experiment_data: dict[str, Any],
+    starter_code: str,
+    starter_evidence_rows: list[dict[str, Any]],
+    growth_data: dict[str, Any],
+    memories: list[dict[str, Any]],
+    litm_probe: dict[str, Any] | None = None,
+    growth_iteration_data: dict[str, Any] | None = None,
+    iteration_memories: list[dict[str, Any]] | None = None,
+) -> list[EvalResult]:
+    evals: list[EvalResult] = []
+    expected_ids = [item["id"] for item in selected]
+    evals.append(
+        evaluate_translation(
+            " ".join(item["original"] for item in selected),
+            translation_data,
+            expected_span_ids=expected_ids,
+        )
+    )
+    for run in qa_runs:
+        span = run["span"]
+        evals.append(
+            evaluate_grounded_qa(
+                run["result"]["data"],
+                span["id"],
+                source_evidence=run.get("source_evidence") or {span["id"]: span["original"]},
+                require_needs_more_context=False,
+            )
+        )
+    evals.append(evaluate_middle_selected_span_grounding(qa_runs))
+    if litm_probe:
+        evals.append(evaluate_lost_in_the_middle(litm_probe))
+    evals.append(evaluate_experiment_spec(experiment_data))
+    evals.append(
+        evaluate_starter_code(
+            starter_code,
+            evidence_rows=starter_evidence_rows,
+            require_evidence_rows=True,
+        )
+    )
+    known_ids = {item.get("id", "") for item in memories}
+    known_ids.update({"paper:selected-middle", "run:r1"})
+    evals.append(evaluate_growth_ideas(growth_data, known_evidence_ids=known_ids, require_multiple_sources=True))
+    if growth_iteration_data is not None:
+        evals.append(evaluate_growth_iteration(growth_iteration_data, iteration_memories or []))
+    return evals
+
+
+def evaluate_growth_iteration(data: dict[str, Any], memories: list[dict[str, Any]]) -> EvalResult:
+    reasons: list[str] = []
+    known_ids = {str(item.get("id", "")) for item in memories}
+    known_ids.update({"paper:selected-middle", "run:r1"})
+    base = evaluate_growth_ideas(data, known_evidence_ids=known_ids, require_multiple_sources=True)
+    reasons.extend(base.reasons)
+    prior_growth_ids = {
+        str(item.get("id", ""))
+        for item in memories
+        if str(item.get("kind", "")) == "growth_idea" and str(item.get("id", "")).startswith("growth_idea:")
+    }
+    if not prior_growth_ids:
+        reasons.append("growth iteration has no prior growth_idea memory to reuse")
+    ideas = data.get("ideas", []) if isinstance(data.get("ideas"), list) else []
+    has_complete_iteration_idea = False
+    for idea in ideas:
+        if not isinstance(idea, dict):
+            continue
+        evidence_ids = {str(source_id) for source_id in idea.get("source_evidence") or []}
+        cites_prior_growth = bool(evidence_ids & prior_growth_ids)
+        cites_run = "run:r1" in evidence_ids
+        cites_paper = "paper:selected-middle" in evidence_ids or any(
+            source_id.startswith("paper:") for source_id in evidence_ids
+        )
+        if cites_prior_growth and cites_run and cites_paper:
+            has_complete_iteration_idea = True
+            break
+    if not has_complete_iteration_idea:
+        reasons.append("no growth iteration idea cites paper memory, run:r1, and a prior growth_idea together")
+    return EvalResult("research_growth_iteration", not reasons, reasons)
+
+
+def evaluate_pdf_parse(source: PaperSource, document: dict[str, Any], spans: list[dict[str, Any]]) -> EvalResult:
+    reasons: list[str] = []
+    if source.pdf_url and source.text.count("[page ") < 1:
+        reasons.append("missing PDF page markers")
+    if source.pdf_url and len(source.text) < 6000:
+        reasons.append("PDF text is too short for real-paper validation")
+    if source.warnings:
+        reasons.extend(source.warnings)
+    if len(spans) < 30:
+        reasons.append("reader produced fewer than 30 visible spans")
+    span_ids = [span["id"] for span in spans]
+    if len(span_ids) != len(set(span_ids)):
+        reasons.append("duplicate reader span ids")
+    if document.get("metadata", {}).get("readerSpanCount") != len(spans):
+        reasons.append("reader metadata does not match visible spans")
+    return EvalResult("pdf_parse_and_reader_spans", not reasons, reasons)
+
+
+def evaluate_middle_selected_span_grounding(qa_runs: list[dict[str, Any]]) -> EvalResult:
+    reasons: list[str] = []
+    middle_runs = [run for run in qa_runs if run["span"].get("position_label") == "middle"]
+    if not middle_runs and len(qa_runs) >= 3:
+        middle_runs = [qa_runs[1]]
+    if not middle_runs:
+        reasons.append("missing middle-position QA run")
+    for run in middle_runs:
+        span_id = run["span"]["id"]
+        data = run["result"]["data"]
+        evidence = data.get("evidence", []) if isinstance(data, dict) else []
+        cited = {item.get("source_id") for item in evidence if isinstance(item, dict)}
+        if span_id not in cited:
+            reasons.append(f"middle span {span_id} was not cited")
+        if run["result"].get("used_fallback"):
+            reasons.append("middle QA used fallback instead of model output")
+    return EvalResult("middle_selected_span_grounding", not reasons, reasons)
+
+
+def evaluate_lost_in_the_middle(probe: dict[str, Any]) -> EvalResult:
+    reasons: list[str] = []
+    stats = probe.get("stats", {}) if isinstance(probe.get("stats"), dict) else {}
+    result = probe.get("result", {}) if isinstance(probe.get("result"), dict) else {}
+    data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+    source_evidence = probe.get("source_evidence", {}) if isinstance(probe.get("source_evidence"), dict) else {}
+    target_span_id = str(stats.get("target_span_id") or "")
+    target_phrase = str(stats.get("target_phrase") or "").strip()
+
+    if int(stats.get("context_span_count") or 0) < 60:
+        reasons.append("long-context probe used fewer than 60 ordered spans")
+    if int(stats.get("context_chars") or 0) < 8000:
+        reasons.append("long-context probe used fewer than 8000 characters")
+    ratio = float(stats.get("target_char_offset_ratio") or 0)
+    if ratio < 0.35 or ratio > 0.65:
+        reasons.append(f"target evidence was not buried near the middle of the context: {ratio:.2f}")
+    if stats.get("foregrounded_selected_span") is not False:
+        reasons.append("target span was foregrounded outside the long evidence packet")
+    if int(stats.get("distractor_count") or 0) < 40:
+        reasons.append("long-context probe did not include enough distractor spans")
+    if stats.get("target_phrase_in_target") is not True:
+        reasons.append("target phrase is not present in the target evidence item")
+    if int(stats.get("target_phrase_non_target_count") or 0) > 0:
+        reasons.append("target phrase also appears in distractor evidence")
+
+    grounded = evaluate_grounded_qa(
+        data,
+        target_span_id,
+        source_evidence=source_evidence,
+        require_needs_more_context=True,
+    )
+    reasons.extend(grounded.reasons)
+    evidence = data.get("evidence", []) if isinstance(data, dict) else []
+    cited_ids = [str(item.get("source_id", "")) for item in evidence if isinstance(item, dict)]
+    non_target_ids = sorted({source_id for source_id in cited_ids if source_id and source_id != target_span_id})
+    if non_target_ids:
+        reasons.append(f"long-context answer cited non-target distractor evidence: {', '.join(non_target_ids)}")
+    target_quotes = [
+        str(item.get("quote", ""))
+        for item in evidence
+        if isinstance(item, dict) and str(item.get("source_id", "")) == target_span_id
+    ]
+    if target_phrase and not any(target_phrase in quote for quote in target_quotes):
+        reasons.append("target evidence quote did not include the exact middle-only phrase")
+    if result.get("used_fallback"):
+        reasons.append("long-context QA used fallback instead of model output")
+    return EvalResult("adversarial_lost_in_the_middle", not reasons, reasons)
+
+
+def evaluate_model_backing(
+    translation: Any,
+    qa_runs: list[dict[str, Any]],
+    experiment: Any,
+    starter: Any,
+    growth: Any,
+    litm_probe: dict[str, Any] | None = None,
+    growth_iteration: Any | None = None,
+) -> EvalResult:
+    reasons: list[str] = []
+    if translation.used_fallback:
+        reasons.append("translation used fallback")
+    for run in qa_runs:
+        if run["result"].get("used_fallback"):
+            reasons.append(f"qa {run['span']['id']} used fallback")
+    if experiment.used_fallback:
+        reasons.append("experiment used fallback")
+    if starter.used_fallback:
+        reasons.append("starter code used fallback")
+    if growth.used_fallback:
+        reasons.append("growth used fallback")
+    if litm_probe and (litm_probe.get("result") or {}).get("used_fallback"):
+        reasons.append("adversarial long-context QA used fallback")
+    if growth_iteration and growth_iteration.used_fallback:
+        reasons.append("growth iteration used fallback")
+    return EvalResult("model_backing", not reasons, reasons)
+
+
+def _failure_records(
+    scenario_id: str,
+    evals: list[EvalResult],
+    translation: Any,
+    qa_runs: list[dict[str, Any]],
+    experiment: Any,
+    starter: Any,
+    growth: Any,
+    litm_probe: dict[str, Any] | None = None,
+    growth_iteration: Any | None = None,
+) -> list[FailureRecord]:
+    qa_model = next((str(run["result"].get("model", "")) for run in qa_runs if run.get("result")), "") or "unknown"
+    adversarial_model = (
+        str(((litm_probe or {}).get("result") or {}).get("model", "")) if litm_probe else ""
+    ) or qa_model
+    model_by_eval = {
+        "pdf_parse_and_reader_spans": experiment.model or starter.model or "unknown",
+        "translation_fidelity": translation.model or "unknown",
+        "grounded_qa": qa_model,
+        "middle_selected_span_grounding": qa_model,
+        "adversarial_lost_in_the_middle": adversarial_model,
+        "experiment_spec": experiment.model or "unknown",
+        "starter_code_source_run": starter.model or "unknown",
+        "growth_ideas": growth.model or "unknown",
+        "research_growth_iteration": (
+            (growth_iteration.model if growth_iteration is not None else "") or growth.model or "unknown"
+        ),
+    }
+    records: list[FailureRecord] = []
+    for item in evals:
+        if item.name == "model_backing":
+            continue
+        for reason in item.reasons:
+            records.append(
+                FailureRecord(
+                    task=item.name,
+                    label=reason,
+                    scenario_id=scenario_id,
+                    model=model_by_eval.get(item.name, experiment.model or growth.model or "unknown"),
+                    severity=(
+                        "high"
+                        if item.name in {"grounded_qa", "middle_selected_span_grounding", "adversarial_lost_in_the_middle"}
+                        else "medium"
+                    ),
+                    root_cause=_root_cause(reason),
+                    fix_attempted=True,
+                )
+            )
+    if translation.used_fallback:
+        records.append(
+            FailureRecord(
+                task="translation",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=translation.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    for run in qa_runs:
+        if run["result"].get("used_fallback"):
+            records.append(
+                FailureRecord(
+                    task="grounded_qa",
+                    label="used fallback",
+                    scenario_id=scenario_id,
+                    model=run["result"].get("model", "unknown"),
+                    severity="medium",
+                    root_cause="model_capability",
+                    fix_attempted=True,
+                )
+            )
+    if experiment.used_fallback:
+        records.append(
+            FailureRecord(
+                task="experiment_spec",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=experiment.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if starter.used_fallback:
+        records.append(
+            FailureRecord(
+                task="starter_code",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=starter.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if growth.used_fallback:
+        records.append(
+            FailureRecord(
+                task="research_growth",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=growth.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if litm_probe and (litm_probe.get("result") or {}).get("used_fallback"):
+        records.append(
+            FailureRecord(
+                task="adversarial_grounded_qa",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=adversarial_model,
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    if growth_iteration is not None and growth_iteration.used_fallback:
+        records.append(
+            FailureRecord(
+                task="research_growth_iteration",
+                label="used fallback",
+                scenario_id=scenario_id,
+                model=growth_iteration.model or growth.model or "unknown",
+                severity="medium",
+                root_cause="model_capability",
+                fix_attempted=True,
+            )
+        )
+    return records
+
+
+def _root_cause(reason: str) -> str:
+    lowered = reason.lower()
+    if any(term in lowered for term in ("pdf", "page marker", "reader", "source index", "source hash", "parse")):
+        return "parser"
+    if any(term in lowered for term in ("fallback", "trace", "provider", "missing source_evidence", "unknown evidence")):
+        return "retrieval"
+    if "schema" in lowered or "json" in lowered or "missing" in lowered:
+        return "schema"
+    if "translation" in lowered or "term" in lowered:
+        return "terminology"
+    if "middle" in lowered or "unsupported" in lowered:
+        return "model_capability"
+    return "retrieval"
+
+
+def _no_model_fine_tuning_decision() -> dict[str, Any]:
+    return {
+        "recommendation": "no",
+        "reason": "Model-backed validation was not enabled, so fallback behavior cannot justify fine-tuning.",
+        "repeated_failures": [],
+    }
+
+
+def _public_result(result: Any) -> dict[str, Any]:
+    return {
+        "task": result.task,
+        "provider": result.provider,
+        "model": result.model,
+        "trace_id": result.trace_id,
+        "error": result.error,
+        "used_fallback": result.used_fallback,
+        "data": result.data,
+    }
+
+
+def _write_result(output_dir: Path, name: str, result: dict[str, Any]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{name}.json"
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _case_by_name_or_arxiv(value: str) -> RealPaperCase:
+    for case in DEFAULT_REAL_PAPERS:
+        if value in {case.name, case.arxiv}:
+            return case
+    return RealPaperCase(
+        name=value.replace("/", "_").replace(".", "_"),
+        arxiv=value,
+        question=DEFAULT_REAL_PAPERS[0].question,
+        idea=DEFAULT_REAL_PAPERS[0].idea,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run PaperLens Lab validation on actual arXiv PDFs.")
+    parser.add_argument("--paper", action="append", default=[], help="arXiv id or bundled case name. Repeatable.")
+    parser.add_argument("--use-model", action="store_true", help="Call the configured model provider.")
+    parser.add_argument("--provider", default=None, help="Override PAPERLENS_PROVIDER.")
+    parser.add_argument("--model", default=None, help="Override PAPERLENS_MODEL.")
+    parser.add_argument("--quality-model", default=None, help="Override PAPERLENS_QUALITY_MODEL.")
+    parser.add_argument("--translation-model", default=None, help="Override PAPERLENS_TRANSLATION_MODEL.")
+    parser.add_argument("--max-pdf-pages", type=int, default=8)
+    parser.add_argument("--max-translate-spans", type=int, default=12)
+    parser.add_argument("--max-reader-spans", type=int, default=180)
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--compact", action="store_true")
+    args = parser.parse_args()
+
+    gateway = ModelGateway(
+        provider=args.provider or DEFAULT_PROVIDER,
+        model_id=args.model or DEFAULT_MODEL,
+        quality_model_id=args.quality_model or QUALITY_MODEL,
+        translation_model_id=args.translation_model or args.model or TRANSLATION_MODEL,
+    )
+    cases = [_case_by_name_or_arxiv(item) for item in args.paper] if args.paper else DEFAULT_REAL_PAPERS
+    result = run_real_papers(
+        cases,
+        gateway=gateway,
+        use_model=args.use_model,
+        max_pdf_pages=args.max_pdf_pages,
+        max_translate_spans=args.max_translate_spans,
+        max_reader_spans=args.max_reader_spans,
+        output_dir=args.output_dir,
+    )
+    if args.compact:
+        print(
+            json.dumps(
+                {
+                    "passed": result["passed"],
+                    "paper_count": result["paper_count"],
+                    "fine_tuning": result["fine_tuning"],
+                    "papers": [
+                        {
+                            "name": run["case"]["name"],
+                            "title": run["source"]["title"],
+                            "passed": run["passed"],
+                            "text_chars": run["source"]["text_chars"],
+                            "page_marker_count": run["source"]["page_marker_count"],
+                            "visible_span_count": run["reader"]["visible_span_count"],
+                            "selected_span_positions": run["reader"]["selected_span_positions"],
+                        }
+                        for run in result["runs"]
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
