@@ -18,7 +18,7 @@ image = (
 
 
 @app.function(image=image, gpu="T4", timeout=900, memory=8192)
-def execute_gpu_probe(job: dict[str, Any]) -> dict[str, Any]:
+def execute_gpu_probe(job: dict[str, Any]) -> str:
     import time
 
     import torch
@@ -34,7 +34,7 @@ def execute_gpu_probe(job: dict[str, Any]) -> dict[str, Any]:
         "torchVersion": torch.__version__,
     }
     if validation_errors:
-        return _result(
+        return _result_json(
             job,
             passed=False,
             reasons=validation_errors,
@@ -55,15 +55,15 @@ def execute_gpu_probe(job: dict[str, Any]) -> dict[str, Any]:
                 "evidence_rows": job.get("evidenceRows", []),
                 "selected_span": job.get("selectedSpan", ""),
                 "paper_title": job.get("paperTitle", ""),
-                "reproduction_level": job.get("reproductionLevel", "scaled"),
-                "requested_reproduction_level": job.get("requestedReproductionLevel", job.get("reproductionLevel", "scaled")),
+                "reproduction_level": job.get("reproductionLevel", "probe"),
+                "requested_reproduction_level": job.get("requestedReproductionLevel", job.get("reproductionLevel", "probe")),
                 "max_train_samples": 12000,
                 "max_test_samples": 2000,
                 "max_epochs": 2,
             }
         )
     except Exception as exc:
-        return _result(
+        return _result_json(
             job,
             passed=False,
             reasons=[f"{type(exc).__name__}: {exc}"],
@@ -73,7 +73,7 @@ def execute_gpu_probe(job: dict[str, Any]) -> dict[str, Any]:
         )
 
     if not isinstance(raw, dict):
-        return _result(
+        return _result_json(
             job,
             passed=False,
             reasons=["GPU probe did not return an object."],
@@ -94,7 +94,8 @@ def execute_gpu_probe(job: dict[str, Any]) -> dict[str, Any]:
         generated_reasons=generated_reasons,
         limitations=limitations,
     )
-    return _result(
+    artifacts = _artifacts_from_raw(raw)
+    return _result_json(
         job,
         passed=execution_completed,
         reasons=execution_reasons,
@@ -104,9 +105,14 @@ def execute_gpu_probe(job: dict[str, Any]) -> dict[str, Any]:
         rows=rows,
         logs=list(raw.get("logs") or []),
         claim_comparison=claim_comparison,
+        artifacts=artifacts,
         limitations=limitations,
         duration_ms=int((time.time() - started) * 1000),
     )
+
+
+def _result_json(job: dict[str, Any], **kwargs: Any) -> str:
+    return json.dumps(_result(job, **kwargs), ensure_ascii=False, sort_keys=True)
 
 
 def _claim_comparison_from_raw(
@@ -132,6 +138,17 @@ def _claim_comparison_from_raw(
     return claim
 
 
+def _artifacts_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    artifacts = dict(raw.get("artifacts")) if isinstance(raw.get("artifacts"), dict) else {}
+    report_html = raw.get("report_html") or raw.get("reportHtml")
+    if report_html and not (artifacts.get("reportHtml") or artifacts.get("report_html")):
+        artifacts["reportHtml"] = str(report_html)
+    metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+    if metrics and not isinstance(artifacts.get("metrics"), dict):
+        artifacts["metrics"] = metrics
+    return artifacts
+
+
 def _result(
     job: dict[str, Any],
     *,
@@ -143,6 +160,7 @@ def _result(
     rows: list[Any] | None = None,
     logs: list[str] | None = None,
     claim_comparison: dict[str, Any] | None = None,
+    artifacts: dict[str, Any] | None = None,
     limitations: list[str] | None = None,
     duration_ms: int,
 ) -> dict[str, Any]:
@@ -151,6 +169,7 @@ def _result(
     metrics = _json_safe(metrics or {})
     rows = _json_safe(rows or [])
     claim_comparison = _json_safe(claim_comparison or {"verdict": "inconclusive", "limitations": limitations or []})
+    artifacts = _json_safe(artifacts or {})
     limitations = _json_safe(limitations or [])
     return {
         "passed": passed,
@@ -165,8 +184,8 @@ def _result(
         "spanId": job.get("spanId", ""),
         "candidateSetId": job.get("candidateSetId", ""),
         "candidateId": job.get("candidateId", ""),
-        "reproductionLevel": job.get("reproductionLevel", "scaled"),
-        "requestedReproductionLevel": job.get("requestedReproductionLevel", job.get("reproductionLevel", "scaled")),
+        "reproductionLevel": job.get("reproductionLevel", "probe"),
+        "requestedReproductionLevel": job.get("requestedReproductionLevel", job.get("reproductionLevel", "probe")),
         "sourceHash": job.get("sourceHash", ""),
         "codeHash": job.get("codeHash", ""),
         "evidenceHash": job.get("evidenceHash", ""),
@@ -180,6 +199,7 @@ def _result(
             *(logs or []),
         ],
         "claimComparison": claim_comparison,
+        "artifacts": artifacts,
         "limitations": limitations,
         "durationMs": duration_ms,
     }
@@ -199,4 +219,6 @@ def _json_safe(value: Any) -> Any:
 def main(payload_path: str) -> str:
     payload = json.loads(Path(payload_path).read_text(encoding="utf-8"))
     result = execute_gpu_probe.remote(payload)
+    if isinstance(result, str):
+        return result
     return json.dumps(result, ensure_ascii=False, sort_keys=True)

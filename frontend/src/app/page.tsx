@@ -24,6 +24,7 @@ export default function LandingPage() {
   const [validationSummary, setValidationSummary] = useState<ValidationSummary | null>(null);
   const [showEvidencePanel, setShowEvidencePanel] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const loadAbortRef = useRef<AbortController | null>(null);
   const text = UI_TEXT[locale].landing;
 
   useEffect(() => {
@@ -48,17 +49,47 @@ export default function LandingPage() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      loadAbortRef.current?.abort();
+    };
+  }, []);
+
   async function handleStart() {
+    if (isLoading) return;
     setLoadError("");
     setIsLoading(true);
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     try {
       const paper =
         inputMode === "upload" && selectedFile
-          ? await uploadPaper(selectedFile)
+          ? await uploadPaper(selectedFile, 64, {
+              signal: controller.signal,
+              timeoutMessage: text.loadTimeout,
+              abortMessage: text.loadCanceled,
+            })
           : inputMode === "arxiv" && arxivUrl.trim()
-            ? await loadPaper({ arxiv_or_url: arxivUrl.trim() })
+            ? await loadPaper(
+                {
+                  arxiv_or_url: arxivUrl.trim(),
+                  max_pdf_pages: 24,
+                },
+                {
+                  signal: controller.signal,
+                  timeoutMessage: text.loadTimeout,
+                  abortMessage: text.loadCanceled,
+                },
+              )
             : inputMode === "paste" && pastedText.trim()
-              ? await loadPaper({ pasted_text: pastedText.trim() })
+              ? await loadPaper(
+                  { pasted_text: pastedText.trim() },
+                  {
+                    signal: controller.signal,
+                    timeoutMessage: text.loadTimeout,
+                    abortMessage: text.loadCanceled,
+                  },
+                )
               : null;
 
       if (!paper) {
@@ -70,8 +101,17 @@ export default function LandingPage() {
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Could not load the paper.");
     } finally {
+      if (loadAbortRef.current === controller) {
+        loadAbortRef.current = null;
+      }
       setIsLoading(false);
     }
+  }
+
+  function handleCancelLoading() {
+    loadAbortRef.current?.abort();
+    setLoadError(text.loadCanceled);
+    setIsLoading(false);
   }
 
   return (
@@ -237,7 +277,7 @@ export default function LandingPage() {
           <button
             onClick={handleStart}
             disabled={isLoading}
-            className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-primary-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary-700 active:bg-primary-800"
+            className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-primary-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary-700 active:bg-primary-800 disabled:cursor-wait disabled:bg-primary-500"
           >
             <svg
               width="18"
@@ -254,6 +294,18 @@ export default function LandingPage() {
             </svg>
             {isLoading ? text.loadingPaper : text.startButton}
           </button>
+          {isLoading && (
+            <div className="mt-3 flex flex-col gap-2 rounded-lg border border-border bg-surface-secondary px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs leading-5 text-text-secondary">{text.loadingHint}</p>
+              <button
+                type="button"
+                onClick={handleCancelLoading}
+                className="self-start rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-primary-300 hover:text-primary-700 sm:self-auto"
+              >
+                {text.cancelLoading}
+              </button>
+            </div>
+          )}
           {loadError && (
             <p className="mt-3 rounded-lg border border-highlight-red bg-highlight-red/60 px-3 py-2 text-xs text-text-secondary">
               {loadError}

@@ -14,6 +14,7 @@ ARXIV_ID_RE = re.compile(
     r"(?:(?:arxiv\.org/(?:abs|pdf)/)|arXiv:)?(?P<id>\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)",
     re.IGNORECASE,
 )
+METADATA_PREFIX_RE = re.compile(r"^(?P<label>title|paper title|authors?|by)\s*[:\-]\s*(?P<value>.+)$", re.IGNORECASE)
 
 
 @dataclass
@@ -31,6 +32,71 @@ def clean_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def infer_pasted_metadata(text: str) -> tuple[str, str]:
+    """Infer visible title/authors from pasted paper text without rewriting content."""
+    lines = [clean_text(line) for line in (text or "").splitlines() if clean_text(line)]
+    if not lines:
+        return "", ""
+
+    title = ""
+    authors = ""
+    title_index = -1
+    for index, line in enumerate(lines[:16]):
+        match = METADATA_PREFIX_RE.match(line)
+        if not match:
+            continue
+        label = match.group("label").lower()
+        value = clean_text(match.group("value"))
+        if label.startswith("title") and value and not title:
+            title = value
+            title_index = index
+        elif label in {"author", "authors", "by"} and value and not authors:
+            authors = value
+
+    if not title:
+        for index, line in enumerate(lines[:8]):
+            if _looks_like_title_line(line):
+                title = line
+                title_index = index
+                break
+
+    if title and not authors:
+        for line in lines[title_index + 1 : title_index + 5]:
+            if _looks_like_author_line(line):
+                authors = line
+                break
+
+    return title, authors
+
+
+def _looks_like_title_line(line: str) -> bool:
+    lowered = line.lower().strip()
+    if not lowered or len(line) < 8 or len(line) > 180:
+        return False
+    if lowered.startswith(("abstract", "keywords", "introduction", "arxiv", "published", "submitted")):
+        return False
+    if lowered in {"paper", "title"}:
+        return False
+    words = line.split()
+    if len(words) > 24:
+        return False
+    return True
+
+
+def _looks_like_author_line(line: str) -> bool:
+    lowered = line.lower().strip()
+    if not lowered or len(line) > 240:
+        return False
+    if lowered.startswith(("abstract", "keywords", "introduction", "department", "university", "school")):
+        return False
+    if any(term in lowered for term in (" we ", " propose ", " method ", " model ", " dataset ", " results ")):
+        return False
+    if not ("," in line or " and " in lowered or re.search(r"\b[A-Z]\.", line)):
+        return False
+    words = line.split()
+    return 2 <= len(words) <= 36
 
 
 def arxiv_id_from(value: str) -> Optional[str]:
@@ -108,9 +174,10 @@ def build_source(
 ) -> PaperSource:
     pasted = clean_text(pasted_text or "")
     arxiv_source = fetch_arxiv_source(arxiv_or_url) if arxiv_or_url.strip() else None
+    pasted_title, pasted_authors = infer_pasted_metadata(pasted)
 
-    title = arxiv_source.title if arxiv_source else "Untitled paper"
-    authors = arxiv_source.authors if arxiv_source else ""
+    title = arxiv_source.title if arxiv_source else pasted_title or "Untitled paper"
+    authors = arxiv_source.authors if arxiv_source else pasted_authors
     source_label = arxiv_source.source_label if arxiv_source else "manual input"
     pdf_url = arxiv_source.pdf_url if arxiv_source else ""
     warnings: list[str] = []

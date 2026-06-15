@@ -14,6 +14,10 @@ interface LandingText {
   pastePlaceholder: string;
   startButton: string;
   loadingPaper: string;
+  loadingHint: string;
+  cancelLoading: string;
+  loadCanceled: string;
+  loadTimeout: string;
   noInputError: string;
   features: {
     sourceCompare: { title: string; desc: string };
@@ -135,6 +139,11 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       pastePlaceholder: "Paste paper text here...",
       startButton: "Start reading",
       loadingPaper: "Loading paper...",
+      loadingHint: "Large PDFs can take a little while. The reader opens first; translation continues after loading.",
+      cancelLoading: "Cancel loading",
+      loadCanceled: "Paper loading was canceled.",
+      loadTimeout:
+        "The paper is taking too long to load. Try again, paste the paper text, or upload the PDF directly.",
       noInputError: "Add a PDF, arXiv URL, or pasted paper text before opening the reader.",
       features: {
         sourceCompare: {
@@ -259,6 +268,11 @@ export const UI_TEXT: Record<Locale, TextDictionary> = {
       pastePlaceholder: "논문 텍스트를 붙여넣으세요...",
       startButton: "논문 읽기 시작",
       loadingPaper: "논문 불러오는 중...",
+      loadingHint: "큰 PDF는 시간이 조금 걸릴 수 있습니다. 먼저 리더를 열고 번역은 이후에 이어집니다.",
+      cancelLoading: "불러오기 취소",
+      loadCanceled: "논문 불러오기를 취소했습니다.",
+      loadTimeout:
+        "논문을 불러오는 데 시간이 너무 오래 걸리고 있습니다. 다시 시도하거나, 논문 텍스트를 붙여넣거나, PDF를 직접 올려주세요.",
       noInputError: "리더를 열기 전에 PDF, arXiv 주소, 또는 논문 텍스트를 넣어주세요.",
       features: {
         sourceCompare: {

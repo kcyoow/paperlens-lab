@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from paperlens_lab.model_adapter import ModelGateway
+from paperlens_lab.prompts import gpu_script_prompt
 from paperlens_lab.scenario_eval import evaluate_experiment_spec, evaluate_starter_code, run_starter_code
 
 
@@ -97,6 +98,35 @@ def run(evidence_rows=None):
         })
     return rows
 '''.strip()
+
+    def test_gpu_script_prompt_requires_model_authored_visual_report(self):
+        prompt = gpu_script_prompt(
+            "Deep Residual Learning for Image Recognition",
+            "Residual networks are easier to optimize.",
+            [{"source_id": "S1", "text": "Residual networks are easier to optimize."}],
+            {
+                "id": "gpu-probe",
+                "title": "Residual vs plain network probe",
+                "reproduction_level": "probe",
+                "run_plan": {"dataset": "CIFAR-10"},
+            },
+            "probe",
+            "en",
+            [],
+        )
+
+        self.assertIn("`reportHtml` must be authored by the generated script/model", prompt)
+        self.assertIn("PaperLens will sanitize and display it", prompt)
+        self.assertIn("will not append, synthesize, or prettify", prompt)
+        self.assertIn("at least one meaningful self-contained visual artifact", prompt)
+        self.assertIn("using inline `<svg>` or `<figure>`", prompt)
+        self.assertIn("must not be a generic metric dashboard", prompt)
+        self.assertIn("paper claim", prompt)
+        self.assertIn("paper evidence/source span", prompt)
+        self.assertIn("experiment setup/code path", prompt)
+        self.assertIn("measured metrics/result", prompt)
+        self.assertIn("comparison to the paper claim", prompt)
+        self.assertIn("limitations/next step", prompt)
 
     def fake_call(self, prompt: str, model_id: str, max_new_tokens: int):
         if '"translations"' in prompt:
@@ -976,6 +1006,289 @@ The code block below stays grounded to the selected mechanism.
         self.assertEqual(len(result.data["candidates"]), 2)
         self.assertTrue(result.data["candidates"][0]["gpu_required"])
 
+    def test_experiment_candidates_repair_unapproved_repo_url_before_failing(self):
+        calls: list[str] = []
+
+        def candidate_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if "Repair PaperLens Lab research-direction JSON" in prompt:
+                return json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "id": "gpu-replication-probe",
+                                "title": "GPU replication probe",
+                                "kind": "gpu_replication_probe",
+                                "reproduction_level": "probe",
+                                "faithfulness": {
+                                    "level": "probe",
+                                    "summary": "Bounded public-dataset probe.",
+                                    "why_not_exact": "No source-listed implementation repo is present.",
+                                    "paper_targets": ["accuracy"],
+                                    "resource_note": "Short GPU run.",
+                                },
+                                "is_recommended": True,
+                                "recommendation_reason": "It gives the clearest visible signal without overclaiming exact reproduction.",
+                                "hypothesis": "A bounded CIFAR-10 run can directionally test the selected image-classification claim.",
+                                "paper_evidence_ids": ["selected"],
+                                "paper_evidence_quotes": ["The selected span reports a GPU-backed image-classification result."],
+                                "dataset": {
+                                    "name": "CIFAR-10",
+                                    "source": "torchvision.datasets.CIFAR10 public dataset",
+                                    "requires_download": True,
+                                },
+                                "implementation": {
+                                    "type": "public_dataset",
+                                    "repo_url": "",
+                                    "reason": "Use torchvision as a library, not as a paper implementation repo.",
+                                },
+                                "run_plan": {
+                                    "repo_url": "",
+                                    "config_path": "",
+                                    "command": "PaperLens Modal GPU run with generated experiment.py",
+                                    "dataset": "CIFAR-10",
+                                    "expected_artifact": "accuracy and loss table",
+                                },
+                                "gpu_required": True,
+                                "estimated_runtime_minutes": 8,
+                                "expected_metric": "validation accuracy and loss",
+                                "limitations": ["Probe only; not exact paper reproduction."],
+                                "approval_question": "Run this bounded GPU probe?",
+                            },
+                            {
+                                "id": "depth-ablation-probe",
+                                "title": "Depth ablation probe",
+                                "kind": "gpu_replication_probe",
+                                "reproduction_level": "probe",
+                                "faithfulness": {
+                                    "level": "probe",
+                                    "summary": "Bounded depth comparison.",
+                                    "why_not_exact": "No source-listed implementation repo is present.",
+                                    "paper_targets": ["depth effect"],
+                                    "resource_note": "Short GPU run.",
+                                },
+                                "is_recommended": False,
+                                "recommendation_reason": "It is useful after the first probe.",
+                                "hypothesis": "A shallow/deeper comparison can expose the claim direction on a bounded dataset.",
+                                "paper_evidence_ids": ["selected"],
+                                "paper_evidence_quotes": ["The selected span reports a GPU-backed image-classification result."],
+                                "dataset": {
+                                    "name": "CIFAR-10",
+                                    "source": "torchvision.datasets.CIFAR10 public dataset",
+                                    "requires_download": True,
+                                },
+                                "implementation": {
+                                    "type": "public_dataset",
+                                    "repo_url": "",
+                                    "reason": "No source-listed repo is available.",
+                                },
+                                "run_plan": {
+                                    "repo_url": "",
+                                    "config_path": "",
+                                    "command": "PaperLens Modal GPU run with generated experiment.py",
+                                    "dataset": "CIFAR-10",
+                                    "expected_artifact": "depth comparison metrics",
+                                },
+                                "gpu_required": True,
+                                "estimated_runtime_minutes": 8,
+                                "expected_metric": "validation accuracy and loss",
+                                "limitations": ["Probe only; not exact paper reproduction."],
+                                "approval_question": "Run the depth comparison probe?",
+                            },
+                        ],
+                        "recommended_candidate_id": "gpu-replication-probe",
+                    }
+                )
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": "gpu-replication-probe",
+                            "title": "GPU replication probe",
+                            "kind": "gpu_replication_probe",
+                            "reproduction_level": "probe",
+                            "faithfulness": {
+                                "level": "probe",
+                                "summary": "Bounded public-dataset probe.",
+                                "why_not_exact": "No source-listed implementation repo is present.",
+                                "paper_targets": ["accuracy"],
+                                "resource_note": "Short GPU run.",
+                            },
+                            "is_recommended": True,
+                            "recommendation_reason": "It uses a public image dataset.",
+                            "hypothesis": "A bounded run can directionally test the selected claim.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports a GPU-backed image-classification result."],
+                            "dataset": {
+                                "name": "CIFAR-10",
+                                "source": "torchvision.datasets.CIFAR10 public dataset",
+                                "requires_download": True,
+                            },
+                            "implementation": {
+                                "type": "public_dataset",
+                                "repo_url": "https://github.com/pytorch/vision",
+                                "reason": "Public library, not paper source.",
+                            },
+                            "run_plan": {
+                                "repo_url": "https://github.com/pytorch/vision",
+                                "config_path": "",
+                                "command": "python run_probe.py",
+                                "dataset": "CIFAR-10",
+                                "expected_artifact": "accuracy",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 8,
+                            "expected_metric": "validation accuracy",
+                            "limitations": ["Probe only; not exact paper reproduction."],
+                            "approval_question": "Run this bounded GPU probe?",
+                        },
+                        {
+                            "id": "source-window-audit",
+                            "title": "Source evidence audit",
+                            "kind": "source_bound_probe",
+                            "reproduction_level": "probe",
+                            "faithfulness": {
+                                "level": "probe",
+                                "summary": "Evidence check.",
+                                "why_not_exact": "No source-listed implementation repo is present.",
+                                "paper_targets": ["evidence"],
+                                "resource_note": "No GPU needed.",
+                            },
+                            "is_recommended": False,
+                            "recommendation_reason": "Pre-run evidence check.",
+                            "hypothesis": "The selected claim can be mapped to nearby source evidence.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports a GPU-backed image-classification result."],
+                            "dataset": {
+                                "name": "PaperLens indexed evidence window",
+                                "source": "selected source rows",
+                                "requires_download": False,
+                            },
+                            "implementation": {"type": "source_bound_probe", "repo_url": "", "reason": "No repo."},
+                            "run_plan": {
+                                "repo_url": "",
+                                "config_path": "",
+                                "command": "PaperLens source-bound check",
+                                "dataset": "PaperLens evidence",
+                                "expected_artifact": "evidence support",
+                            },
+                            "gpu_required": False,
+                            "estimated_runtime_minutes": 1,
+                            "expected_metric": "evidence support",
+                            "limitations": ["Does not execute the claim."],
+                            "approval_question": "Run the evidence check?",
+                        },
+                    ],
+                    "recommended_candidate_id": "gpu-replication-probe",
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=candidate_call)
+        result = gateway.experiment_candidates(
+            paper_title="Image Classification Paper",
+            selected_span="The selected span reports a GPU-backed image-classification result.",
+            translated_span="",
+            source_text="The selected span reports a GPU-backed image-classification result.",
+            question="What experiment should we run from this span?",
+            locale="en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback, result.error)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("uses a repo URL that is not listed in the paper source", calls[1])
+        self.assertEqual(result.data["candidates"][0]["implementation"]["repo_url"], "")
+        self.assertEqual(result.data["candidates"][0]["run_plan"]["repo_url"], "")
+
+    def test_experiment_candidates_reject_invalid_candidate_reproduction_level(self):
+        def candidate_call(prompt, model_id, max_new_tokens):
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": "invalid-middle-mode",
+                            "title": "Invalid middle mode",
+                            "kind": "gpu_replication_probe",
+                            "reproduction_level": "scaled",
+                            "faithfulness": {
+                                "level": "scaled",
+                                "summary": "Invalid middle mode.",
+                                "why_not_exact": "No exact repo.",
+                                "paper_targets": ["accuracy"],
+                                "resource_note": "short run",
+                            },
+                            "is_recommended": True,
+                            "recommendation_reason": "This should be rejected.",
+                            "hypothesis": "A middle mode should not be exposed.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports a GPU-backed training result."],
+                            "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10", "requires_download": True},
+                            "implementation": {"type": "public_dataset", "repo_url": "", "reason": "No repo."},
+                            "run_plan": {
+                                "repo_url": "",
+                                "config_path": "",
+                                "command": "python run.py",
+                                "dataset": "CIFAR-10",
+                                "expected_artifact": "accuracy",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 5,
+                            "expected_metric": "accuracy",
+                            "limitations": ["Invalid middle mode."],
+                            "approval_question": "Run it?",
+                        },
+                        {
+                            "id": "valid-probe",
+                            "title": "Valid probe",
+                            "kind": "gpu_replication_probe",
+                            "reproduction_level": "probe",
+                            "faithfulness": {
+                                "level": "probe",
+                                "summary": "Valid probe.",
+                                "why_not_exact": "No exact repo.",
+                                "paper_targets": ["accuracy"],
+                                "resource_note": "short run",
+                            },
+                            "is_recommended": False,
+                            "recommendation_reason": "Valid fallback.",
+                            "hypothesis": "A probe can be exposed.",
+                            "paper_evidence_ids": ["selected"],
+                            "paper_evidence_quotes": ["The selected span reports a GPU-backed training result."],
+                            "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10", "requires_download": True},
+                            "implementation": {"type": "public_dataset", "repo_url": "", "reason": "No repo."},
+                            "run_plan": {
+                                "repo_url": "",
+                                "config_path": "",
+                                "command": "python run.py",
+                                "dataset": "CIFAR-10",
+                                "expected_artifact": "accuracy",
+                            },
+                            "gpu_required": True,
+                            "estimated_runtime_minutes": 5,
+                            "expected_metric": "accuracy",
+                            "limitations": ["Probe only."],
+                            "approval_question": "Run it?",
+                        },
+                    ],
+                    "recommended_candidate_id": "invalid-middle-mode",
+                }
+            )
+
+        gateway = ModelGateway(provider="hf", call_model=candidate_call)
+        result = gateway.experiment_candidates(
+            paper_title="GPU Training Paper",
+            selected_span="The selected span reports a GPU-backed training result.",
+            translated_span="",
+            source_text="The selected span reports a GPU-backed training result.",
+            question="Find research directions from the paper.",
+            locale="en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIn("invalid reproduction_level scaled", result.error or "")
+
     def test_experiment_candidates_reject_exact_without_source_repo(self):
         def candidate_call(prompt, model_id, max_new_tokens):
             return json.dumps(
@@ -1014,12 +1327,12 @@ The code block below stays grounded to the selected mechanism.
                             "approval_question": "Run exact reproduction?",
                         },
                         {
-                            "id": "scaled-reproduction",
-                            "title": "Scaled reproduction",
+                            "id": "probe-reproduction",
+                            "title": "Probe reproduction",
                             "kind": "gpu_replication_probe",
-                            "reproduction_level": "scaled",
+                            "reproduction_level": "probe",
                             "faithfulness": {
-                                "level": "scaled",
+                                "level": "probe",
                                 "summary": "Bounded run.",
                                 "why_not_exact": "No source-listed implementation repo is present.",
                                 "paper_targets": ["accuracy"],
@@ -1035,7 +1348,7 @@ The code block below stays grounded to the selected mechanism.
                             "run_plan": {
                                 "repo_url": "",
                                 "config_path": "",
-                                "command": "python run_scaled.py",
+                                "command": "python run_probe.py",
                                 "dataset": "Public benchmark",
                                 "expected_artifact": "accuracy",
                             },
@@ -1043,7 +1356,7 @@ The code block below stays grounded to the selected mechanism.
                             "estimated_runtime_minutes": 10,
                             "expected_metric": "accuracy",
                             "limitations": ["Not exact."],
-                            "approval_question": "Run scaled reproduction?",
+                            "approval_question": "Run probe reproduction?",
                         },
                     ],
                     "recommended_candidate_id": "exact-reproduction",
@@ -1105,12 +1418,12 @@ The code block below stays grounded to the selected mechanism.
                             "approval_question": "Run exact reproduction?",
                         },
                         {
-                            "id": "scaled-reproduction",
-                            "title": "Scaled reproduction",
+                            "id": "probe-reproduction",
+                            "title": "Probe reproduction",
                             "kind": "gpu_replication_probe",
-                            "reproduction_level": "scaled",
+                            "reproduction_level": "probe",
                             "faithfulness": {
-                                "level": "scaled",
+                                "level": "probe",
                                 "summary": "Bounded run.",
                                 "why_not_exact": "No config path is confirmed.",
                                 "paper_targets": ["accuracy"],
@@ -1126,7 +1439,7 @@ The code block below stays grounded to the selected mechanism.
                             "run_plan": {
                                 "repo_url": repo_url,
                                 "config_path": "",
-                                "command": "python run_scaled.py",
+                                "command": "python run_probe.py",
                                 "dataset": "Official benchmark subset",
                                 "expected_artifact": "accuracy",
                             },
@@ -1134,7 +1447,7 @@ The code block below stays grounded to the selected mechanism.
                             "estimated_runtime_minutes": 10,
                             "expected_metric": "accuracy",
                             "limitations": ["Not exact."],
-                            "approval_question": "Run scaled reproduction?",
+                            "approval_question": "Run probe reproduction?",
                         },
                     ],
                     "recommended_candidate_id": "exact-reproduction",
@@ -1223,6 +1536,7 @@ The code block below stays grounded to the selected mechanism.
                         "    lengths = [len(str(row.get('en') or '').split()) for row in records]\n"
                         "    tensor = torch.tensor(lengths, dtype=torch.float32, device=device)\n"
                         "    mean_length = float(tensor.mean().detach().cpu()) if tensor.numel() else 0.0\n"
+                        "    reportHtml = f\"\"\"<section><h1>Multi30k Probe</h1><p><strong>Paper claim</strong>: the paper reports WMT translation quality, so this probe checks a bounded real translation dataset path rather than exact training.</p><p><strong>Paper evidence</strong>: the approved source span mentions WMT 2014 English-to-German and English-to-French results.</p><p><strong>Experiment setup</strong>: load bentrevett/multi30k train[:64] and compute a GPU tensor metric from real English examples.</p><figure><svg viewBox='0 0 240 80' role='img' aria-label='Measured metric mean token length'><rect x='12' y='20' width='{max(4, min(200, mean_length * 8))}' height='24'></rect><text x='12' y='62'>measured metric mean tokens {mean_length:.2f}</text></svg></figure><p><strong>Claim comparison</strong>: directional_probe_only, not a WMT reproduction.</p><p><strong>Limitations</strong>: bounded public dataset probe; next step is exact paper training/eval config.</p></section>\"\"\"\n"
                         "    return {\n"
                         "        'passed': bool(tensor.numel()),\n"
                         "        'metrics': {'mean_english_tokens': mean_length},\n"
@@ -1232,6 +1546,7 @@ The code block below stays grounded to the selected mechanism.
                         "        'dataset': {'name': 'Multi30k', 'source': 'bentrevett/multi30k train[:64]'},\n"
                         "        'limitations': ['Directional GPU data-loading and metric probe, not full WMT14 training.'],\n"
                         "        'claim_comparison': {'verdict': 'directional_probe_only'},\n"
+                        "        'artifacts': {'reportHtml': reportHtml, 'metrics': {'mean_english_tokens': mean_length}, 'manifest': {'reproductionLevel': 'probe'}},\n"
                         "    }\n"
                     ),
                     "entrypoint": "run_paperlens_gpu_probe",
@@ -1286,6 +1601,126 @@ The code block below stays grounded to the selected mechanism.
         self.assertNotIn("eval(", result.data["script"])
         self.assertNotIn("load_dataset('multi30k'", result.data["script"])
         self.assertIn("bentrevett/multi30k", result.data["script"])
+
+    def test_gpu_script_raw_python_requires_model_repair_envelope(self):
+        raw_code = """
+```python
+import torch
+
+def run_paperlens_gpu_probe(config=None):
+    cuda = torch.cuda.is_available()
+    report = "<figure><svg width='120' height='32'><rect width='100' height='20'></rect></svg><figcaption>Probe metric</figcaption></figure>"
+    return {
+        "passed": True,
+        "metrics": {"probe_metric": 1.0},
+        "rows": [{"metric": "probe_metric", "value": 1.0}],
+        "logs": [f"cuda={cuda}"],
+        "hardware": {"cudaAvailable": cuda},
+        "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10"},
+        "limitations": ["bounded probe"],
+        "claim_comparison": {"verdict": "directional_probe_only"},
+        "artifacts": {
+            "reportHtml": report,
+            "manifest": {"reproductionLevel": "probe", "dataset": "CIFAR-10"},
+            "metrics": {"probe_metric": 1.0},
+        },
+    }
+```
+""".strip()
+
+        calls = []
+
+        def repairing_raw_python_call(prompt, model_id, max_new_tokens):
+            calls.append(prompt)
+            if "repairing a PaperLens Lab GPU replication probe JSON" in prompt:
+                return json.dumps(
+                    {
+                        "script": (
+                            "import torch\n\n"
+                            "def run_paperlens_gpu_probe(config=None):\n"
+                            "    cuda = torch.cuda.is_available()\n"
+                            "    report = \"<section><h1>Probe metric</h1><p><strong>Paper claim</strong>: the approved paper claim is tested only as a bounded probe.</p><p><strong>Paper evidence</strong>: source span evidence is the comparison anchor.</p><p><strong>Experiment setup</strong>: run the generated code path on CIFAR-10 style data.</p><figure><svg width='120' height='32'><rect width='100' height='20'></rect></svg><figcaption>Measured metric probe_metric 1.0</figcaption></figure><p><strong>Claim comparison</strong>: directional_probe_only.</p><p><strong>Limitations</strong>: bounded probe; next step is exact reproduction.</p></section>\"\n"
+                            "    return {'passed': True, 'metrics': {'probe_metric': 1.0}, "
+                            "'rows': [{'metric': 'probe_metric', 'value': 1.0}], "
+                            "'logs': [f'cuda={cuda}'], 'hardware': {'cudaAvailable': cuda}, "
+                            "'dataset': {'name': 'CIFAR-10', 'source': 'torchvision.datasets.CIFAR10'}, "
+                            "'limitations': ['bounded probe'], "
+                            "'claim_comparison': {'verdict': 'directional_probe_only'}, "
+                            "'artifacts': {'reportHtml': report, 'manifest': {'reproductionLevel': 'probe'}, "
+                            "'metrics': {'probe_metric': 1.0}}}\n"
+                        ),
+                        "entrypoint": "run_paperlens_gpu_probe",
+                        "dependencies": ["torch", "torchvision"],
+                        "hardware": "T4",
+                        "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10"},
+                        "reproduction_level": "probe",
+                        "reproduction_plan": {
+                            "level": "probe",
+                            "repo_url": "",
+                            "config_path": "",
+                            "command": "python experiment.py",
+                            "dataset": "CIFAR-10",
+                            "expected_artifact": "reportHtml",
+                            "faithfulness_note": "Model repaired the raw Python into the required JSON envelope.",
+                        },
+                        "expected_outputs": ["metrics", "rows", "reportHtml"],
+                        "paper_claim_comparison_plan": "Compare the bounded metric directionally.",
+                        "limitations": ["bounded probe"],
+                    }
+                )
+            return raw_code
+
+        gateway = ModelGateway(provider="hf", call_model=repairing_raw_python_call)
+        result = gateway.gpu_script(
+            paper_title="Deep Residual Learning for Image Recognition",
+            selected_span="Residual networks are easier to optimize.",
+            source_text="Residual networks are easier to optimize on CIFAR-10.",
+            candidate={
+                "id": "gpu-probe",
+                "title": "Residual probe",
+                "reproduction_level": "probe",
+                "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10"},
+                "run_plan": {"dataset": "CIFAR-10"},
+            },
+            locale="en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback, result.error)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(result.data.get("recovered_from_non_json", False))
+        self.assertIn("run_paperlens_gpu_probe", result.data["script"])
+
+    def test_gpu_script_does_not_treat_truncated_json_as_raw_python(self):
+        truncated_json = (
+            '{"script": "import torch\\n\\ndef run_paperlens_gpu_probe(config=None):\\n'
+            "    return {'passed': True, 'metrics': {}, 'rows': [], 'logs': [], "
+            "'hardware': {'cudaAvailable': torch.cuda.is_available()}, "
+            "'dataset': {'name': 'CIFAR-10'}, 'limitations': [], "
+            "'claim_comparison': {}, 'artifacts': {'reportHtml': '<figure><svg></svg></figure>'}}\", "
+            '"reproduction_plan": {'
+        )
+
+        gateway = ModelGateway(provider="hf", call_model=lambda *_: truncated_json)
+        result = gateway.gpu_script(
+            paper_title="Deep Residual Learning for Image Recognition",
+            selected_span="Residual networks are easier to optimize.",
+            source_text="Residual networks are easier to optimize on CIFAR-10.",
+            candidate={
+                "id": "gpu-probe",
+                "title": "Residual probe",
+                "reproduction_level": "probe",
+                "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10"},
+                "run_plan": {"dataset": "CIFAR-10"},
+            },
+            locale="en",
+            use_model=True,
+        )
+
+        self.assertFalse(result.used_fallback)
+        self.assertIn("non-JSON", result.error or "")
+        self.assertFalse(result.data.get("recovered_from_non_json"))
 
     def test_gpu_script_validation_failure_does_not_fallback(self):
         def invalid_gpu_script_call(prompt, model_id, max_new_tokens):

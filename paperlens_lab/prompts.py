@@ -203,8 +203,8 @@ def experiment_candidates_prompt(
     implementation_links: list[dict[str, str]] | None = None,
 ) -> str:
     implementation_links = implementation_links or []
-    return f"""You are PaperLens Lab planning real service experiments from a highlighted paper span.
-The user is asking inside the product UI, so propose choices they can approve.
+    return f"""You are PaperLens Lab planning real service research directions from a paper.
+The user is asking inside the product UI. Read the supplied paper context and current anchor evidence, then propose choices they can approve.
 Return only valid JSON:
 {{
   "candidates": [
@@ -212,8 +212,8 @@ Return only valid JSON:
       "id": "gpu-replication-probe",
       "title": "...",
       "kind": "gpu_replication_probe",
-      "reproduction_level": "probe|scaled|exact",
-      "faithfulness": {{"level": "probe|scaled|exact", "summary": "...", "why_not_exact": "", "paper_targets": ["..."], "resource_note": "..."}},
+      "reproduction_level": "probe|exact",
+      "faithfulness": {{"level": "probe|exact", "summary": "...", "why_not_exact": "", "paper_targets": ["..."], "resource_note": "..."}},
       "is_recommended": true,
       "recommendation_reason": "...",
       "hypothesis": "...",
@@ -237,7 +237,7 @@ Paper: {paper_title}
 Locale: {locale}
 Requested reproduction level: {reproduction_level}
 User question: {question}
-Selected span:
+Current anchor evidence:
 {selected_span}
 Available translation:
 {translated_span}
@@ -247,22 +247,85 @@ Implementation links found in the paper source:
 {json.dumps(implementation_links, ensure_ascii=False, indent=2)}
 
 Rules:
-- Return 2 or 3 candidates.
-- Treat the requested reproduction level as the user's target, but classify every candidate honestly as `exact`, `scaled`, or `probe`.
+- Return 2 or 3 research directions.
+- Treat the requested reproduction level as the user's target, but classify every candidate honestly as `exact` or `probe` only.
 - `exact` means source-listed paper implementation/config/data path. Use `exact` only when the needed repo URL appears in Implementation links, the candidate `implementation.type` is `paper_repo`, and `run_plan.repo_url`, `config_path`, `command`, and `dataset` are all filled from paper/source-listed implementation evidence.
-- If the user requests `exact` and no source-listed implementation path is available, return scaled/probe candidates with `why_not_exact` explaining the missing repo/config/data path. Do not label them exact.
-- `scaled` means the same method family and real data path, but bounded epochs, subsets, model size, or runtime.
-- `probe` means a small source-bound directional experiment that helps understand the claim without claiming reproduction.
+- If the user requests `exact` and no source-listed implementation path is available, return probe candidates with `why_not_exact` explaining the missing repo/config/data path. Do not label them exact.
+- `probe` means a bounded but real experiment that uses actual code/data paths where possible and helps understand the paper claim without claiming exact reproduction.
 - At least one candidate should be a GPU replication probe when a small public dataset or implementation path can test the selected claim directionally.
 - Mark exactly one candidate as recommended and set `recommended_candidate_id` to that id.
 - Every candidate must cite only `source_id` values from Allowed paper evidence in `paper_evidence_ids`.
 - Include short source quotes copied from Allowed paper evidence in `paper_evidence_quotes`.
 - Prefer source-listed GitHub repos only when they appear in Implementation links; never invent repo URLs.
-- If no repo is listed, use a transparent public-dataset or source-bound replication probe and say that it is not a full reproduction.
+- For `probe` candidates, leave `implementation.repo_url` and `run_plan.repo_url` empty unless the repo appears in Implementation links. Public libraries or framework repos should be described in `dataset.source`, `run_plan.command`, or `implementation.reason`, not as a paper repo.
+- If no repo is listed, use a transparent public-dataset or source-bound replication probe and say that it is not an exact reproduction.
 - Do not propose toy, fake, random-vector, synthetic, simulated, placeholder, or template-only experiments unless the selected paper explicitly studies synthetic data; if so, state that limitation.
 - Keep each candidate runnable for a hackathon demo. Avoid multi-day training, multi-GPU clusters, proprietary datasets, and full benchmark reproduction.
 - The recommended candidate should be the best balance of paper faithfulness, visible result, runtime, and GPU usefulness.
+- If the user's question is not supported by the supplied paper evidence, do not invent a direction. Return only the nearest supported paper-grounded alternatives.
 - Return one JSON object only. Do not add markdown fences, headings, or commentary before/after the JSON.
+"""
+
+
+def experiment_candidates_repair_prompt(
+    previous_output: str,
+    error_text: str,
+    source_evidence: list[dict[str, str]],
+    reproduction_level: str,
+    locale: str,
+    implementation_links: list[dict[str, str]] | None = None,
+) -> str:
+    implementation_links = implementation_links or []
+    return f"""Repair PaperLens Lab research-direction JSON so it passes the service contract.
+Return only valid JSON with this shape:
+{{
+  "candidates": [
+    {{
+      "id": "...",
+      "title": "...",
+      "kind": "gpu_replication_probe",
+      "reproduction_level": "probe|exact",
+      "faithfulness": {{"level": "probe|exact", "summary": "...", "why_not_exact": "", "paper_targets": ["..."], "resource_note": "..."}},
+      "is_recommended": true,
+      "recommendation_reason": "...",
+      "hypothesis": "...",
+      "paper_evidence_ids": ["..."],
+      "paper_evidence_quotes": ["..."],
+      "dataset": {{"name": "...", "source": "...", "requires_download": true}},
+      "implementation": {{"type": "paper_repo|public_dataset|source_bound_probe", "repo_url": "", "reason": "..."}},
+      "run_plan": {{"repo_url": "", "config_path": "", "command": "", "dataset": "", "expected_artifact": ""}},
+      "why_not_exact": "",
+      "gpu_required": true,
+      "estimated_runtime_minutes": 10,
+      "expected_metric": "...",
+      "limitations": ["..."],
+      "approval_question": "..."
+    }}
+  ],
+  "recommended_candidate_id": "..."
+}}
+
+Locale: {locale}
+Requested reproduction level: {reproduction_level}
+Errors to fix:
+{error_text}
+
+Allowed paper evidence:
+{json.dumps(source_evidence, ensure_ascii=False, indent=2)}
+Implementation links found in the paper source:
+{json.dumps(implementation_links, ensure_ascii=False, indent=2)}
+
+Previous output:
+{previous_output}
+
+Rules:
+- Return 2 or 3 candidates and exactly one recommendation.
+- Cite only allowed `source_id` values.
+- Never invent GitHub/repo URLs.
+- `exact` is allowed only with an Implementation links repo and filled repo/config/command/dataset.
+- For `probe`, leave `implementation.repo_url` and `run_plan.repo_url` empty unless the repo appears in Implementation links.
+- Do not use toy, fake, random, synthetic, simulated, placeholder, or template-only experiments.
+- Return one JSON object only. No markdown fences, headings, or commentary.
 """
 
 
@@ -276,7 +339,7 @@ def gpu_script_prompt(
     implementation_repo_manifests: list[dict[str, Any]] | None = None,
 ) -> str:
     implementation_repo_manifests = implementation_repo_manifests or []
-    return f"""You are PaperLens Lab generating an approved GPU replication probe script.
+    return f"""You are PaperLens Lab generating an approved Paper Research Sandbox GPU script.
 The script will be shown to the user in Lab Modal and then executed in a Modal GPU container.
 Return only valid JSON:
 {{
@@ -285,8 +348,8 @@ Return only valid JSON:
   "dependencies": ["torch", "torchvision", "numpy"],
   "hardware": "T4",
   "dataset": {{"name": "...", "source": "..."}},
-  "reproduction_level": "probe|scaled|exact",
-  "reproduction_plan": {{"level": "probe|scaled|exact", "repo_url": "", "config_path": "", "command": "", "dataset": "", "expected_artifact": "", "faithfulness_note": ""}},
+  "reproduction_level": "probe|exact",
+  "reproduction_plan": {{"level": "probe|exact", "repo_url": "", "config_path": "", "command": "", "dataset": "", "expected_artifact": "", "faithfulness_note": ""}},
   "expected_outputs": ["..."],
   "paper_claim_comparison_plan": "...",
   "limitations": ["..."]
@@ -295,7 +358,7 @@ Return only valid JSON:
 Paper: {paper_title}
 Locale: {locale}
 Approved reproduction level: {reproduction_level}
-Selected span:
+Current anchor evidence:
 {selected_span}
 Approved candidate:
 {json.dumps(candidate, ensure_ascii=False, indent=2)}
@@ -306,13 +369,15 @@ Implementation repo inspection:
 
 Script contract:
 - The Python script must define `def run_paperlens_gpu_probe(config=None):`.
-- The function must return a JSON-serializable dict with keys: `passed`, `metrics`, `rows`, `logs`, `hardware`, `dataset`, `limitations`, and `claim_comparison`.
+- The function must return a JSON-serializable dict with keys: `passed`, `metrics`, `rows`, `logs`, `hardware`, `dataset`, `limitations`, `claim_comparison`, and `artifacts`.
+- Keep the returned JSON and Python script compact. Prefer one readable file under about 180 lines, short comments, and simple helper functions. Do not include long prose blocks outside `reportHtml`.
+- Prefer the simplest real public dataset path that tests the approved direction. For image probes, use a bounded `torchvision.datasets.CIFAR10` subset under `/tmp` when it is faithful to the candidate.
 - Use PyTorch and GPU when CUDA is available. Record `torch.cuda.is_available()` and the GPU name in `hardware`.
 - Keep runtime bounded: default to a small subset, at most 2 epochs or an equivalent short probe.
 - Preserve the approved reproduction level in `reproduction_level` and `reproduction_plan.level`.
 - If the approved level is `exact`, use only a source-listed inspected implementation path from Implementation repo inspection and fill `reproduction_plan.repo_url`, `config_path`, `dataset`, and `command`; otherwise return a script that fails clearly instead of pretending a public-dataset probe is exact.
-- If the approved level is `scaled`, use the closest paper-faithful bounded path and label the comparison as scaled, not exact.
-- If the approved level is `probe`, label the comparison as a directional probe, not a reproduction.
+- If the approved level is `probe`, leave `reproduction_plan.repo_url` empty unless it is a source-listed inspected paper implementation repo. Put public libraries such as torchvision in `dataset`, `command`, or `faithfulness_note`, not in `repo_url`.
+- If the approved level is `probe`, label the comparison as a bounded real probe, not exact reproduction.
 - Use a real public dataset or the source-listed implementation path when available. If using a public dataset as a probe, label it as a directional probe rather than a full reproduction.
 - Do not use mock classes, random tensors, random labels, random-vector, fake, placeholder, toy, simulated, or synthetic data.
 - Do not create a Dataset from `torch.randint`, `torch.randn`, `np.random`, or hardcoded made-up examples. If a download fails, return a failed result with logs instead of substituting generated data.
@@ -323,6 +388,17 @@ Script contract:
 - If benchmarking Transformer/LSTM throughput, create one embedding layer and pass the same embedded float tensor with shape `[batch, seq_len, d_model]` into both model families. Do not pass raw token id tensors directly to `TransformerEncoder`.
 - If using `Counter(...).most_common(N)`, iterate directly over the returned `(item, count)` pairs. Do not call `.items()` on the list returned by `most_common`.
 - Returned `hardware`, `dataset`, `metrics`, `rows`, `logs`, `limitations`, and `claim_comparison` values must be JSON-serializable; convert devices, tensors, numpy scalars, and paths to strings/floats/ints/lists/dicts.
+- The `script` value must be plain syntactically valid Python source inside the JSON string. Do not wrap it in markdown fences. Avoid nested triple-quoted f-strings; when building `reportHtml`, prefer short escaped string fragments in a list and `"".join(parts)` so quotes cannot break the Python parser.
+- Return `artifacts` as a JSON-serializable object with:
+  - `reportHtml`: a self-contained HTML report for the user to inspect in the sandbox result panel.
+  - `manifest`: structured provenance including reproduction level, dataset, metric names, and the comparison target.
+  - `metrics`: the same structured metrics used by the system.
+- `reportHtml` must be authored by the generated script/model, not by PaperLens post-processing. PaperLens will sanitize and display it, but will not append, synthesize, or prettify semantic/visual explanations after execution.
+- `reportHtml` is the user's main sandbox artifact. It must not be a generic metric dashboard. It must explain the approved paper-specific experiment in the user's language when possible.
+- Build `reportHtml` from the approved candidate, allowed paper evidence, measured metrics/rows, `claim_comparison`, dataset/provenance, and limitations. Do not invent paper results that were not in the evidence.
+- The visible report must include compact sections or labels for: paper claim, paper evidence/source span, experiment setup/code path, measured metrics/result, comparison to the paper claim, and limitations/next step.
+- `reportHtml` may include inline CSS, inline SVG plots, inline tables, and safe self-contained previews generated by the script. When numeric metrics, rows, images, or dataset examples are available, include at least one meaningful self-contained visual artifact chosen by the script/model, using inline `<svg>` or `<figure>`. It must not include scripts, iframes, forms, external URLs, remote images, or hidden network calls. Keep it useful for a user asking "what did this experiment show, how is it tied to this paper, and what should I look at next?".
+- Do not let the HTML report overclaim. It must clearly say whether the run is `exact` or `probe`, compare only against the approved paper claim/evidence, and list the same limitations as the structured result.
 - Do not require secrets, shell commands, notebook state, user files, or manual setup.
 - Do not open arbitrary local files. Do not call subprocess, requests, sockets, external APIs, Python built-in `eval(...)`, `exec`, `compile`, `open`, `input`, or `__import__`. PyTorch lifecycle calls such as `model.eval()` are allowed.
 - Use only these import roots: `torch`, `torchvision`, `numpy`, `datasets`, `sacrebleu`, `json`, `math`, `time`, `collections`, `itertools`.
@@ -349,8 +425,8 @@ Return only valid JSON:
   "dependencies": ["torch", "numpy"],
   "hardware": "T4",
   "dataset": {{"name": "...", "source": "..."}},
-  "reproduction_level": "probe|scaled|exact",
-  "reproduction_plan": {{"level": "probe|scaled|exact", "repo_url": "", "config_path": "", "command": "", "dataset": "", "expected_artifact": "", "faithfulness_note": ""}},
+  "reproduction_level": "probe|exact",
+  "reproduction_plan": {{"level": "probe|exact", "repo_url": "", "config_path": "", "command": "", "dataset": "", "expected_artifact": "", "faithfulness_note": ""}},
   "expected_outputs": ["..."],
   "paper_claim_comparison_plan": "...",
   "limitations": ["..."]
@@ -372,10 +448,12 @@ Previous output:
 
 Rules:
 - The script must define `def run_paperlens_gpu_probe(config=None):`.
+- Keep the repaired JSON and Python script compact. Prefer one readable file under about 180 lines, short comments, and simple helper functions.
 - Use PyTorch and record CUDA availability and GPU name in the returned `hardware`.
 - Use a real public dataset or source-listed implementation context. Do not use mock classes, random tensors, random labels, fake, dummy, placeholder, toy, simulated, or synthetic data.
 - Preserve the approved reproduction level in `reproduction_level` and `reproduction_plan.level`; never repair a public-dataset probe into `exact`.
 - If the approved level is `exact`, `reproduction_plan.repo_url`, `config_path`, `dataset`, and `command` must all be filled from source-listed implementation evidence.
+- If the approved level is `probe`, `reproduction_plan.repo_url` must be empty unless it is a source-listed inspected paper implementation repo.
 - Do not create a Dataset from `torch.randint`, `torch.randn`, `np.random`, or hardcoded made-up examples. If a dataset download fails, return `passed: false` with logs and limitations.
 - For translation claims, prefer a real public translation dataset through the `datasets` library and use a bounded subset.
 - If using Multi30k, call `load_dataset("bentrevett/multi30k", split="train[:N]")`; do not call `load_dataset("multi30k", ...)`.
@@ -383,7 +461,11 @@ Rules:
 - For Multi30k text probes, do not use `DataLoader` or custom `Dataset`. Build one fixed-shape tensor directly by truncating/padding every row to exactly `seq_len`.
 - If benchmarking Transformer/LSTM throughput, create one embedding layer and pass the same embedded float tensor with shape `[batch, seq_len, d_model]` into both model families. Do not pass raw token id tensors directly to `TransformerEncoder`.
 - If using `Counter(...).most_common(N)`, iterate directly over the returned `(item, count)` pairs. Do not call `.items()` on the list returned by `most_common`.
-- Returned `hardware`, `dataset`, `metrics`, `rows`, `logs`, `limitations`, and `claim_comparison` values must be JSON-serializable; convert devices, tensors, numpy scalars, and paths to strings/floats/ints/lists/dicts.
+- Returned `hardware`, `dataset`, `metrics`, `rows`, `logs`, `limitations`, `claim_comparison`, and `artifacts` values must be JSON-serializable; convert devices, tensors, numpy scalars, and paths to strings/floats/ints/lists/dicts.
+- The repaired `script` value must be plain syntactically valid Python source inside the JSON string. Do not wrap it in markdown fences. Avoid nested triple-quoted f-strings; when building `reportHtml`, prefer short escaped string fragments in a list and `"".join(parts)` so quotes cannot break the Python parser.
+- Return `artifacts.reportHtml` as a concise self-contained HTML report authored by the generated script/model, with no scripts, iframes, forms, external URLs, remote images, or hidden network calls. The report must not be a generic metric dashboard.
+- Build `artifacts.reportHtml` from the approved candidate, allowed paper evidence, measured metrics/rows, `claim_comparison`, dataset/provenance, and limitations. It must include compact visible sections or labels for paper claim, paper evidence/source span, experiment setup/code path, measured metrics/result, comparison to the paper claim, and limitations/next step.
+- When numeric metrics, rows, images, or dataset examples are available, `artifacts.reportHtml` must include at least one meaningful self-contained visual artifact chosen by the script/model, using inline `<svg>` or `<figure>`. PaperLens will sanitize and display the report, but will not append, synthesize, or prettify semantic/visual explanations after execution.
 - Use only these import roots: `torch`, `torchvision`, `numpy`, `datasets`, `sacrebleu`, `json`, `math`, `time`, `collections`, `itertools`.
 - Do not import `torchtext`, `spacy`, `transformers`, or any package that is not in the allowed import roots.
 - Do not call Python built-in `eval(...)`, `exec`, `compile`, `open`, `input`, or `__import__`. PyTorch lifecycle calls such as `model.eval()` are allowed.

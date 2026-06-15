@@ -26,7 +26,7 @@ The active Hugging Face Space stays on the Gradio SDK for Build Small Hackathon 
 - Optional UI language: Korean.
 - Main runtime: `app.py`.
 - Product frontend: `frontend/`, exported to `frontend/out` and kept deployable for the Hugging Face Space.
-- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, experiment cards, Research Growth memory loops, source-evidence starter execution, and Modal-backed mini-lab execution are wired through Python; full-document batch translation and full repository reproduction remain staged Lab Mode extensions.
+- Current boundary: PDF/arXiv ingestion, source extraction, on-demand Korean span translation, selected-span grounded Q&A, Paper Research Sandbox directions, model-authored experiment files, sanitized model-authored HTML reports, Research Growth memory loops, and Modal-backed GPU execution are wired through Python. Exact paper reproduction is available only when a paper-linked implementation/config/data path is verified; otherwise Lab Mode stays honest as a Probe.
 
 ## Current Preview Flow
 
@@ -43,9 +43,10 @@ The Python backend keeps the original hooks for source-grounded analysis and exp
 - `POST /api/paper` for arXiv/text source loading.
 - `POST /api/paper/upload` for PDF extraction.
 - `POST /api/ask` for selected-span grounded answers.
-- `POST /api/experiment` for paper-to-experiment cards and starter code.
-- `POST /api/starter/run` for executing generated starter code against indexed paper evidence rows.
-- `POST /api/mini-lab/run` for running the selected starter as a source/code-bound mini-lab job, locally or through Modal.
+- `POST /api/experiment/candidates` for model-proposed Probe/Exact research directions grounded in the loaded paper.
+- `POST /api/experiment/gpu-script` for approved, model-authored sandbox files and execution metadata.
+- `POST /api/gpu-lab/run` for Modal GPU execution of the approved sandbox script.
+- Legacy `POST /api/experiment`, `POST /api/starter/run`, and `POST /api/mini-lab/run` remain for earlier source-bound mini-lab paths.
 
 The reader-first flow remains in React: original text, Korean translation draft, side-by-side checking, marks, source inspection, AI question affordance, and Lab Mode affordance.
 
@@ -83,6 +84,21 @@ Useful runtime switches:
 - `PAPERLENS_MODAL_BIN=/opt/anaconda3/bin/modal` when the Modal CLI is installed outside the active shell `PATH`
 - `PAPERLENS_MODAL_MINILAB_TIMEOUT=180` to bound the local wait for a Modal mini-lab job
 - `NEXT_PUBLIC_PAPERLENS_USE_MODEL=1` for the exported React frontend
+- `NEXT_PUBLIC_PAPERLENS_PAPER_LOAD_TIMEOUT_MS=75000` to keep initial PDF/arXiv loading recoverable from the product UI
+- `NEXT_PUBLIC_PAPERLENS_LAB_MODEL_TIMEOUT_MS=300000` to bound visible Lab Mode model waits for candidate/script generation
+
+## Paper Research Sandbox Contract
+
+Lab Mode is intentionally product-facing rather than a hidden backend demo:
+
+- visible modes are only `Probe` and `Exact`;
+- the model proposes paper-grounded research directions before code is generated;
+- the user approves a direction before sandbox files are created;
+- `experiment.py`, `config.json`, and `manifest.json` are inspectable before GPU execution;
+- returned `reportHtml` is authored by the generated model script, sanitized by PaperLens, and rendered in a sandboxed iframe;
+- internal validator, provider, Modal CLI, stack trace, and fallback details are not shown in the Lab Modal;
+- raw Python without the required JSON envelope is repaired by the model or fails closed, not wrapped by PaperLens into a successful experiment;
+- `Exact` requires source-listed implementation/config/data evidence, while public-dataset runs stay labeled as `Probe`.
 
 ## Backend Scenario Checks
 

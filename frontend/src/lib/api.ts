@@ -5,8 +5,10 @@ const MODEL_FLAG = process.env.NEXT_PUBLIC_PAPERLENS_USE_MODEL;
 const USE_MODEL = MODEL_FLAG === undefined
   ? true
   : ["1", "true", "yes"].includes(MODEL_FLAG.toLowerCase());
+const PAPER_LOAD_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_PAPERLENS_PAPER_LOAD_TIMEOUT_MS ?? 75_000);
+const LAB_MODEL_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_PAPERLENS_LAB_MODEL_TIMEOUT_MS ?? 300_000);
 
-export type ReproductionLevel = "probe" | "scaled" | "exact";
+export type ReproductionLevel = "probe" | "exact";
 
 export interface PaperLoadInput {
   arxiv_or_url?: string;
@@ -15,6 +17,12 @@ export interface PaperLoadInput {
   use_model?: boolean;
   max_translate_spans?: number;
   max_reader_spans?: number;
+}
+
+export interface RequestTimingOptions {
+  signal?: AbortSignal;
+  timeoutMessage?: string;
+  abortMessage?: string;
 }
 
 export interface ExperimentResult {
@@ -127,8 +135,12 @@ export interface ExperimentCandidatesResult {
 
 export interface GpuScriptResult {
   gpuRunId: string;
+  workspaceId?: string;
+  workspace?: SandboxWorkspace;
   gpuRun?: {
     id: string;
+    workspaceId?: string;
+    workspace?: SandboxWorkspace;
     candidateSetId: string;
     candidateId: string;
     paperId: string;
@@ -166,6 +178,38 @@ export interface GpuScriptResult {
   usedFallback?: boolean;
 }
 
+export interface SandboxWorkspaceFile {
+  path: string;
+  language?: string;
+  role?: string;
+  content: string;
+}
+
+export interface SandboxWorkspace {
+  id: string;
+  status?: string;
+  title?: string;
+  paperTitle?: string;
+  reproductionLevel?: ReproductionLevel;
+  requestedReproductionLevel?: ReproductionLevel;
+  plan?: Record<string, unknown>;
+  dataset?: Record<string, unknown>;
+  files?: SandboxWorkspaceFile[];
+  provenance?: Record<string, unknown>;
+}
+
+export interface SandboxArtifacts {
+  reportHtml?: string;
+  reportTitle?: string;
+  generatedBy?: "model" | string;
+  reportStatus?: "model_html" | "missing_model_html" | string;
+  missingModelReport?: boolean;
+  manifest?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  files?: Array<Record<string, unknown>>;
+  sandbox?: Record<string, unknown>;
+}
+
 export interface GpuProbeRunResult {
   passed: boolean;
   reasons: string[];
@@ -191,6 +235,7 @@ export interface GpuProbeRunResult {
   rows: Array<Record<string, unknown>>;
   logs: string[];
   claimComparison?: Record<string, unknown>;
+  artifacts?: SandboxArtifacts;
   limitations: string[];
   durationMs: number;
 }
@@ -435,6 +480,53 @@ async function parseJson<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutMessage: string,
+  options: { abortMessage?: string } = {},
+): Promise<Response> {
+  const upstreamSignal = init.signal;
+  const controller = new AbortController();
+  const abortFromUpstream = () => controller.abort();
+  if (upstreamSignal?.aborted) {
+    controller.abort();
+  } else {
+    upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
+  }
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      if (upstreamSignal?.aborted) {
+        throw new Error(options.abortMessage ?? "The paper load was canceled.");
+      }
+      throw new Error(timeoutMessage);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+  }
+}
+
+function paperLoadTimeoutMessage() {
+  return "The paper is taking too long to load. Try again, paste the paper text, or upload the PDF directly.";
+}
+
+function labTimeoutMessage(locale: "en" | "ko", stage: "directions" | "script") {
+  if (locale === "ko") {
+    return stage === "directions"
+      ? "모델이 연구 방향을 준비하는 데 오래 걸리고 있습니다. 다시 시도하거나 질문을 더 좁혀주세요."
+      : "모델이 샌드박스 파일을 준비하는 데 오래 걸리고 있습니다. 다시 시도하거나 다른 연구 방향을 선택해주세요.";
+  }
+  return stage === "directions"
+    ? "The model is taking too long to prepare research directions. Try again or narrow the question."
+    : "The model is taking too long to prepare sandbox files. Try again or choose another direction.";
+}
+
 function assertServiceBinding(fields: Record<string, string>) {
   for (const [name, value] of Object.entries(fields)) {
     if (!value.trim()) {
@@ -444,19 +536,46 @@ function assertServiceBinding(fields: Record<string, string>) {
 }
 
 const PAPER_STORAGE_KEY = "paperlens-paper";
+const LAB_SESSION_STORAGE_KEY = "paperlens-lab-session-id";
+const LAB_WORKSPACE_STORAGE_KEY = "paperlens-lab-workspace-id";
 
-export async function loadPaper(input: PaperLoadInput): Promise<PaperDocument> {
-  const response = await fetch(`${API_BASE}/api/paper`, {
+function stableClientId(storageKey: string, prefix: string): string {
+  if (typeof window === "undefined") {
+    return `${prefix}_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
+  }
+  const existing = window.localStorage.getItem(storageKey);
+  if (existing) return existing;
+  const randomId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
+  const value = `${prefix}_${randomId}`;
+  window.localStorage.setItem(storageKey, value);
+  return value;
+}
+
+function labSessionBinding() {
+  return {
+    session_id: stableClientId(LAB_SESSION_STORAGE_KEY, "sess"),
+    workspace_id: stableClientId(LAB_WORKSPACE_STORAGE_KEY, "ws"),
+  };
+}
+
+export async function loadPaper(input: PaperLoadInput, options: RequestTimingOptions = {}): Promise<PaperDocument> {
+  const response = await fetchWithTimeout(`${API_BASE}/api/paper`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: options.signal,
     body: JSON.stringify({
       arxiv_or_url: input.arxiv_or_url ?? "",
       pasted_text: input.pasted_text ?? "",
       max_pdf_pages: input.max_pdf_pages ?? 64,
-      use_model: input.use_model ?? USE_MODEL,
+      use_model: input.use_model ?? false,
       max_translate_spans: input.max_translate_spans ?? 24,
       max_reader_spans: input.max_reader_spans ?? 800,
     }),
+  }, PAPER_LOAD_TIMEOUT_MS, options.timeoutMessage ?? paperLoadTimeoutMessage(), {
+    abortMessage: options.abortMessage,
   });
   return parseJson<PaperDocument>(response);
 }
@@ -469,17 +588,24 @@ export async function loadValidationSummary(): Promise<ValidationSummary> {
   return parseJson<ValidationSummary>(response);
 }
 
-export async function uploadPaper(file: File, maxPdfPages = 64): Promise<PaperDocument> {
+export async function uploadPaper(
+  file: File,
+  maxPdfPages = 64,
+  options: RequestTimingOptions = {},
+): Promise<PaperDocument> {
   const formData = new FormData();
   formData.set("pdf", file);
   formData.set("max_pdf_pages", String(maxPdfPages));
-  formData.set("use_model", String(USE_MODEL));
+  formData.set("use_model", "false");
   formData.set("max_translate_spans", "24");
   formData.set("max_reader_spans", "800");
 
-  const response = await fetch(`${API_BASE}/api/paper/upload`, {
+  const response = await fetchWithTimeout(`${API_BASE}/api/paper/upload`, {
     method: "POST",
+    signal: options.signal,
     body: formData,
+  }, PAPER_LOAD_TIMEOUT_MS, options.timeoutMessage ?? paperLoadTimeoutMessage(), {
+    abortMessage: options.abortMessage,
   });
   return parseJson<PaperDocument>(response);
 }
@@ -707,6 +833,7 @@ export async function buildExperiment(params: {
       idea: params.span.original,
       locale: params.locale,
       use_model: USE_MODEL,
+      ...labSessionBinding(),
     }),
   });
   return parseJson<ExperimentResult>(response);
@@ -727,7 +854,7 @@ export async function buildExperimentCandidates(params: {
     selectedSpan: params.span.original,
     sourceText: params.sourceText,
   });
-  const response = await fetch(`${API_BASE}/api/experiment/candidates`, {
+  const response = await fetchWithTimeout(`${API_BASE}/api/experiment/candidates`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -742,8 +869,9 @@ export async function buildExperimentCandidates(params: {
       reproduction_level: params.reproductionLevel,
       locale: params.locale,
       use_model: USE_MODEL,
+      ...labSessionBinding(),
     }),
-  });
+  }, LAB_MODEL_TIMEOUT_MS, labTimeoutMessage(params.locale, "directions"));
   return parseJson<ExperimentCandidatesResult>(response);
 }
 
@@ -760,7 +888,7 @@ export async function generateGpuScript(params: {
     spanId: params.span.id,
     selectedSpan: params.span.original,
   });
-  const response = await fetch(`${API_BASE}/api/experiment/gpu-script`, {
+  const response = await fetchWithTimeout(`${API_BASE}/api/experiment/gpu-script`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -772,8 +900,9 @@ export async function generateGpuScript(params: {
       reproduction_level: params.reproductionLevel,
       locale: params.locale,
       use_model: USE_MODEL,
+      ...labSessionBinding(),
     }),
-  });
+  }, LAB_MODEL_TIMEOUT_MS, labTimeoutMessage(params.locale, "script"));
   return parseJson<GpuScriptResult>(response);
 }
 
@@ -785,6 +914,7 @@ export async function runGpuProbe(params: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       gpu_run_id: params.gpuRunId,
+      ...labSessionBinding(),
     }),
   });
   return parseJson<GpuProbeRunResult>(response);
@@ -838,6 +968,7 @@ export async function runMiniLab(params: {
       paper_title: params.paperTitle,
       span_id: params.span.id,
       selected_span: params.span.original,
+      ...labSessionBinding(),
     }),
   });
   return parseJson<MiniLabRunResult>(response);

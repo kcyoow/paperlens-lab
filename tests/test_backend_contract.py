@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ class BackendContractTests(unittest.TestCase):
         os.environ["PAPERLENS_MEMORY_PATH"] = str(Path(self.tempdir.name) / "paper_memory.jsonl")
         os.environ["PAPERLENS_SOURCE_INDEX_DIR"] = str(Path(self.tempdir.name) / "source_index")
         os.environ["PAPERLENS_TRANSLATION_CACHE_DIR"] = str(Path(self.tempdir.name) / "translation_cache")
+        os.environ["PAPERLENS_SANDBOX_WORKSPACE_DIR"] = str(Path(self.tempdir.name) / "sandbox_workspaces")
         os.environ["PAPERLENS_ENABLE_DIAGNOSTIC_STARTER"] = "1"
         _EXPERIMENT_RUNS.clear()
         _CANDIDATE_SETS.clear()
@@ -54,9 +56,13 @@ class BackendContractTests(unittest.TestCase):
             "paper_title": document["title"],
             "span_id": selected["id"],
             "selected_span": selected_fragment or selected["original"],
+            "session_id": "session-test-1",
+            "workspace_id": "workspace-test-1",
         }
 
     def authorized_mini_lab_payload(self, payload: dict) -> dict:
+        session_id = payload.get("session_id", "session-test-1")
+        workspace_id = payload.get("workspace_id", "workspace-test-1")
         run = _issue_experiment_run(
             paper_id=payload["paper_id"],
             paper_title=payload["paper_title"],
@@ -69,8 +75,10 @@ class BackendContractTests(unittest.TestCase):
             model="test-model",
             starter_provider="hf",
             starter_model="test-model",
+            session_id=session_id,
+            workspace_id=workspace_id,
         )
-        return {**payload, "experiment_run_id": run["id"]}
+        return {**payload, "experiment_run_id": run["id"], "session_id": session_id, "workspace_id": workspace_id}
 
     def indexed_experiment_payload(self, *, idea: str = "Try source-bound evidence reranking", locale: str = "ko") -> dict:
         source = PaperSource(
@@ -94,6 +102,8 @@ class BackendContractTests(unittest.TestCase):
             "idea": idea,
             "locale": locale,
             "use_model": True,
+            "session_id": "session-test-1",
+            "workspace_id": "workspace-test-1",
         }
 
     def tearDown(self):
@@ -101,8 +111,10 @@ class BackendContractTests(unittest.TestCase):
         os.environ.pop("PAPERLENS_MEMORY_PATH", None)
         os.environ.pop("PAPERLENS_SOURCE_INDEX_DIR", None)
         os.environ.pop("PAPERLENS_TRANSLATION_CACHE_DIR", None)
+        os.environ.pop("PAPERLENS_SANDBOX_WORKSPACE_DIR", None)
         os.environ.pop("PAPERLENS_ENABLE_DIAGNOSTIC_STARTER", None)
         os.environ.pop("PAPERLENS_MINILAB_PROVIDER", None)
+        os.environ.pop("PAPERLENS_ENABLE_EXACT_REPO_RUNNER", None)
         self.tempdir.cleanup()
 
     def test_health_exposes_runtime_switches(self):
@@ -133,6 +145,28 @@ class BackendContractTests(unittest.TestCase):
         self.assertIn("original", first_span)
         self.assertIn("translated", first_span)
         self.assertTrue(first_span["id"].startswith("P0.S"))
+
+    def test_pasted_paper_infers_visible_title_and_authors(self):
+        response = self.client.post(
+            "/api/paper",
+            json={
+                "pasted_text": (
+                    "LoRA: Low-Rank Adaptation of Large Language Models\n"
+                    "Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu\n\n"
+                    "Abstract\n"
+                    "We propose Low-Rank Adaptation, or LoRA, for efficient adaptation of large language models. "
+                    "LoRA freezes the pretrained model weights and injects trainable rank decomposition matrices. "
+                    "Experiments compare parameter counts and adaptation quality across downstream tasks."
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["title"], "LoRA: Low-Rank Adaptation of Large Language Models")
+        self.assertIn("Edward J. Hu", body["authors"])
+        self.assertNotIn("Unknown authors", body["authors"])
+        self.assertEqual(body["source"], "manual input")
 
     def test_manual_papers_get_distinct_content_bound_ids(self):
         first = self.client.post(
@@ -1026,9 +1060,9 @@ class BackendContractTests(unittest.TestCase):
             "id": "gpu-replication-probe",
             "title": "GPU replication probe",
             "kind": "gpu_replication_probe",
-            "reproduction_level": "scaled",
+            "reproduction_level": "probe",
             "faithfulness": {
-                "level": "scaled",
+                "level": "probe",
                 "summary": "Bounded reproduction of the paper claim direction.",
                 "why_not_exact": "The fixture does not provide a source-listed official repo.",
                 "paper_targets": ["test_accuracy"],
@@ -1100,9 +1134,9 @@ class BackendContractTests(unittest.TestCase):
                     "dependencies": ["torch"],
                     "hardware": "T4",
                     "dataset": {"name": "MNIST", "source": "torchvision.datasets.MNIST"},
-                    "reproduction_level": "scaled",
+                    "reproduction_level": "probe",
                     "reproduction_plan": {
-                        "level": "scaled",
+                        "level": "probe",
                         "repo_url": "",
                         "config_path": "",
                         "command": "python run_probe.py",
@@ -1138,8 +1172,8 @@ class BackendContractTests(unittest.TestCase):
                 "codeHash": "code",
                 "evidenceHash": "evidence",
                 "evidenceRowCount": 3,
-                "reproductionLevel": "scaled",
-                "requestedReproductionLevel": "scaled",
+                "reproductionLevel": "probe",
+                "requestedReproductionLevel": "probe",
                 "validation": {"providerIsModal": True, "gpuRequested": True},
                 "dataset": {"name": "MNIST"},
                 "metrics": {"test_accuracy": 0.95},
@@ -1155,7 +1189,7 @@ class BackendContractTests(unittest.TestCase):
                 json={
                     **payload,
                     "question": "What experiment should we run for this span?",
-                    "reproduction_level": "scaled",
+                    "reproduction_level": "probe",
                     "use_model": True,
                 },
             )
@@ -1163,10 +1197,35 @@ class BackendContractTests(unittest.TestCase):
             candidates_body = candidates_response.json()
             self.assertEqual(len(candidates_body["candidates"]), 2)
             self.assertEqual(candidates_body["recommendedCandidateId"], "gpu-replication-probe")
-            self.assertEqual(candidates_body["reproductionLevel"], "scaled")
+            self.assertEqual(candidates_body["reproductionLevel"], "probe")
 
-            unapproved_run = self.client.post("/api/gpu-lab/run", json={"gpu_run_id": ""})
+            unapproved_run = self.client.post(
+                "/api/gpu-lab/run",
+                json={
+                    "gpu_run_id": "",
+                    "session_id": payload["session_id"],
+                    "workspace_id": payload["workspace_id"],
+                },
+            )
             self.assertEqual(unapproved_run.status_code, 403)
+
+            foreign_script_response = self.client.post(
+                "/api/experiment/gpu-script",
+                json={
+                    "candidate_set_id": candidates_body["candidateSetId"],
+                    "candidate_id": "gpu-replication-probe",
+                    "paper_id": payload["paper_id"],
+                    "span_id": payload["span_id"],
+                    "selected_span": payload["selected_span"],
+                    "reproduction_level": "probe",
+                    "locale": "en",
+                    "use_model": True,
+                    "session_id": "session-other",
+                    "workspace_id": payload["workspace_id"],
+                },
+            )
+            self.assertEqual(foreign_script_response.status_code, 403)
+            self.assertIn("another browser session", foreign_script_response.json()["detail"])
 
             script_response = self.client.post(
                 "/api/experiment/gpu-script",
@@ -1176,26 +1235,142 @@ class BackendContractTests(unittest.TestCase):
                     "paper_id": payload["paper_id"],
                     "span_id": payload["span_id"],
                     "selected_span": payload["selected_span"],
-                    "reproduction_level": "scaled",
+                    "reproduction_level": "probe",
                     "locale": "en",
                     "use_model": True,
+                    "session_id": payload["session_id"],
+                    "workspace_id": payload["workspace_id"],
                 },
             )
             self.assertEqual(script_response.status_code, 200)
             script_body = script_response.json()
             self.assertIn("gpuRunId", script_body)
             self.assertIn("run_paperlens_gpu_probe", script_body["script"])
-            self.assertEqual(script_body["reproductionLevel"], "scaled")
-            self.assertEqual(script_body["gpuRun"]["reproductionLevel"], "scaled")
+            self.assertEqual(script_body["reproductionLevel"], "probe")
+            self.assertEqual(script_body["gpuRun"]["reproductionLevel"], "probe")
+            self.assertIn("workspaceId", script_body)
+            self.assertIn("workspace", script_body)
+            workspace_files = script_body["workspace"]["files"]
+            self.assertIn("experiment.py", {item["path"] for item in workspace_files})
+            self.assertIn("config.json", {item["path"] for item in workspace_files})
+            self.assertIn("manifest.json", {item["path"] for item in workspace_files})
+            workspace_path = (
+                Path(os.environ["PAPERLENS_SANDBOX_WORKSPACE_DIR"])
+                / script_body["workspaceId"]
+                / "workspace.json"
+            )
+            self.assertTrue(workspace_path.exists())
 
-            run_response = self.client.post("/api/gpu-lab/run", json={"gpu_run_id": script_body["gpuRunId"]})
+            foreign_run_response = self.client.post(
+                "/api/gpu-lab/run",
+                json={
+                    "gpu_run_id": script_body["gpuRunId"],
+                    "session_id": payload["session_id"],
+                    "workspace_id": "workspace-other",
+                },
+            )
+            self.assertEqual(foreign_run_response.status_code, 403)
+            self.assertIn("another browser session", foreign_run_response.json()["detail"])
+
+            run_response = self.client.post(
+                "/api/gpu-lab/run",
+                json={
+                    "gpu_run_id": script_body["gpuRunId"],
+                    "session_id": payload["session_id"],
+                    "workspace_id": payload["workspace_id"],
+                },
+            )
             self.assertEqual(run_response.status_code, 200)
             run_body = run_response.json()
             self.assertEqual(run_body["provider"], "modal")
-            self.assertEqual(run_body["reproductionLevel"], "scaled")
+            self.assertEqual(run_body["reproductionLevel"], "probe")
             self.assertTrue(run_body["gpuRequested"])
             self.assertEqual(run_body["metrics"]["test_accuracy"], 0.95)
+            result_path = (
+                Path(os.environ["PAPERLENS_SANDBOX_WORKSPACE_DIR"])
+                / script_body["workspaceId"]
+                / "result.json"
+            )
+            self.assertTrue(result_path.exists())
             run_gpu.assert_called_once()
+
+    def test_experiment_candidates_use_whole_indexed_paper_context_not_selected_window_only(self):
+        source = PaperSource(
+            title="Whole Paper Direction Test",
+            authors="A. Author",
+            source_label="unit-whole-paper",
+            text=(
+                "Sentence one introduces the anchor setup. "
+                "Sentence two is the selected optimization claim. "
+                "Sentence three is near the selected claim. "
+                "Sentence four is still near the selected claim. "
+                "Sentence five is nearby context. "
+                "Sentence six is outside the narrow evidence window. "
+                "Sentence seven describes an ImageNet ablation table far from the selected anchor. "
+                "Sentence eight describes a CIFAR depth experiment far from the selected anchor."
+            ),
+        )
+        document = paper_document_from_source(source, max_reader_spans=12)
+        selected = document["sections"][0]["paragraphs"][0]["spans"][1]
+        candidate = {
+            "id": "whole-paper-probe",
+            "title": "Whole paper probe",
+            "kind": "gpu_replication_probe",
+            "reproduction_level": "probe",
+            "is_recommended": True,
+            "recommendation_reason": "Uses the far paper experiment evidence.",
+            "hypothesis": "The far CIFAR depth experiment can be probed.",
+            "paper_evidence_ids": ["selected"],
+            "paper_evidence_quotes": [selected["original"]],
+            "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10"},
+            "implementation": {"type": "public_dataset", "repo_url": "", "reason": "No repo needed."},
+            "run_plan": {
+                "repo_url": "",
+                "config_path": "",
+                "command": "python run_probe.py",
+                "dataset": "CIFAR-10",
+                "expected_artifact": "accuracy",
+            },
+            "gpu_required": True,
+            "estimated_runtime_minutes": 5,
+            "expected_metric": "accuracy",
+            "limitations": ["Probe, not exact reproduction."],
+            "approval_question": "Open this probe?",
+        }
+
+        with patch("paperlens_lab.server.ModelGateway") as gateway_cls:
+            gateway = gateway_cls.return_value
+            gateway.experiment_candidates.return_value = SimpleNamespace(
+                data={"candidates": [candidate, {**candidate, "id": "second-probe", "is_recommended": False}], "recommended_candidate_id": "whole-paper-probe"},
+                text="candidates",
+                model="test-model",
+                provider="hf",
+                trace_id="candidate_trace",
+                error=None,
+                used_fallback=False,
+            )
+
+            response = self.client.post(
+                "/api/experiment/candidates",
+                json={
+                    "paper_id": document["id"],
+                    "span_id": selected["id"],
+                    "paper_title": document["title"],
+                    "selected_span": selected["original"],
+                    "source_text": source.text,
+                    "question": "Find research directions from the paper.",
+                    "reproduction_level": "probe",
+                    "locale": "en",
+                    "use_model": True,
+                    "session_id": "session-test-1",
+                    "workspace_id": "workspace-test-1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = gateway.experiment_candidates.call_args.kwargs
+        self.assertIn("Sentence eight describes a CIFAR depth experiment far from the selected anchor.", kwargs["source_text"])
+        self.assertIn(selected["original"], kwargs["selected_span"])
 
     def test_gpu_script_failure_returns_public_product_message(self):
         payload = self.indexed_experiment_payload(locale="en")
@@ -1269,6 +1444,8 @@ class BackendContractTests(unittest.TestCase):
                     "selected_span": payload["selected_span"],
                     "locale": "en",
                     "use_model": True,
+                    "session_id": payload["session_id"],
+                    "workspace_id": payload["workspace_id"],
                 },
             )
 
@@ -1277,6 +1454,40 @@ class BackendContractTests(unittest.TestCase):
         self.assertIn("did not pass service execution checks", detail)
         self.assertNotIn("fallback", detail.lower())
         self.assertNotIn("torch.randn", detail)
+
+    def test_experiment_candidate_failure_returns_public_product_message(self):
+        payload = self.indexed_experiment_payload(locale="en")
+        with patch("paperlens_lab.server.ModelGateway") as gateway_cls:
+            gateway = gateway_cls.return_value
+            gateway.experiment_candidates.return_value = SimpleNamespace(
+                data={},
+                text="",
+                model="test-model",
+                provider="hf",
+                trace_id="candidate_trace",
+                error=(
+                    "generated experiment candidates failed checks: "
+                    "candidate 2 uses a repo URL that is not listed in the paper source"
+                ),
+                used_fallback=False,
+            )
+
+            response = self.client.post(
+                "/api/experiment/candidates",
+                json={
+                    **payload,
+                    "question": "What experiment should we run for this span?",
+                    "reproduction_level": "probe",
+                    "use_model": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        detail = response.json()["detail"]
+        self.assertIn("paper-grounded research directions", detail)
+        self.assertNotIn("repo URL", detail)
+        self.assertNotIn("failed checks", detail)
+        self.assertNotIn("candidate 2", detail)
 
     def test_exact_gpu_script_requires_inspected_paper_repo(self):
         payload = self.indexed_experiment_payload(locale="en")
@@ -1364,15 +1575,18 @@ class BackendContractTests(unittest.TestCase):
                     "reproduction_level": "exact",
                     "locale": "en",
                     "use_model": True,
+                    "session_id": payload["session_id"],
+                    "workspace_id": payload["workspace_id"],
                 },
             )
 
         self.assertEqual(script_response.status_code, 503)
         detail = script_response.json()["detail"]
-        self.assertIn("Exact reproduction requires an inspected implementation repository", detail)
+        self.assertIn("Exact reproduction requires the repo/config/dataset sandbox runner", detail)
         gateway.gpu_script.assert_not_called()
 
     def test_gpu_script_rejects_script_level_mismatch_before_run_binding(self):
+        os.environ["PAPERLENS_ENABLE_EXACT_REPO_RUNNER"] = "1"
         payload = self.indexed_experiment_payload(locale="en")
         candidate = {
             "id": "exact-reproduction",
@@ -1500,6 +1714,8 @@ class BackendContractTests(unittest.TestCase):
                     "reproduction_level": "exact",
                     "locale": "en",
                     "use_model": True,
+                    "session_id": payload["session_id"],
+                    "workspace_id": payload["workspace_id"],
                 },
             )
 
@@ -1535,8 +1751,8 @@ class BackendContractTests(unittest.TestCase):
             "codeHash": "code-hash",
             "evidenceHash": "evidence-hash",
             "evidenceRowCount": 3,
-            "reproductionLevel": "scaled",
-            "requestedReproductionLevel": "scaled",
+            "reproductionLevel": "probe",
+            "requestedReproductionLevel": "probe",
         }
         result = {
             "passed": False,
@@ -1571,11 +1787,91 @@ class BackendContractTests(unittest.TestCase):
 
         body = _validated_gpu_result(result, job)
 
-        self.assertTrue(body["passed"], body)
-        self.assertEqual(body["reasons"], [])
+        self.assertFalse(body["passed"], body)
+        self.assertIn(
+            "The GPU result could not be verified against the approved paper experiment contract.",
+            body["reasons"],
+        )
+        self.assertNotIn("Generated GPU script did not return", json.dumps(body))
         self.assertFalse(body["claimComparison"]["generatedPassed"])
         self.assertEqual(body["claimComparison"]["verdict"], "not_supported")
-        self.assertEqual(body["reproductionLevel"], "scaled")
+        self.assertEqual(body["reproductionLevel"], "probe")
+        self.assertIn("artifacts", body)
+        self.assertEqual(body["artifacts"]["reportHtml"], "")
+        self.assertEqual(body["artifacts"]["generatedBy"], "model")
+        self.assertTrue(body["artifacts"]["missingModelReport"])
+        self.assertEqual(body["artifacts"]["reportStatus"], "missing_model_html")
+        self.assertNotIn("notice", body["artifacts"])
+
+    def test_gpu_result_sanitizes_model_report_html_artifact(self):
+        job = {
+            "paperId": "paper-1",
+            "paperTitle": "Real Paper",
+            "spanId": "P0.S5",
+            "candidateSetId": "candidate-set-1",
+            "candidateId": "gpu-replication-probe",
+            "sourceHash": "source-hash",
+            "codeHash": "code-hash",
+            "evidenceHash": "evidence-hash",
+            "evidenceRowCount": 3,
+            "reproductionLevel": "probe",
+            "requestedReproductionLevel": "probe",
+        }
+        result = {
+            "passed": True,
+            "reasons": [],
+            "provider": "modal",
+            "executionMode": "modal-gpu-replication-probe",
+            "runner": "paperlens-modal-gpu-probe",
+            "gpuRequested": True,
+            "hardware": {"cudaAvailable": True, "gpuName": "Tesla T4"},
+            "paperId": "paper-1",
+            "spanId": "P0.S5",
+            "candidateId": "gpu-replication-probe",
+            "codeHash": "code-hash",
+            "evidenceHash": "evidence-hash",
+            "metrics": {"accuracy": 0.75},
+            "rows": [{"metric": "accuracy", "value": 0.75}],
+            "logs": ["cuda=True"],
+            "claimComparison": {"verdict": "supported", "generatedPassed": True},
+            "limitations": ["bounded run"],
+            "durationMs": 1200,
+            "artifacts": {
+                "reportHtml": (
+                    "<section onclick=\"alert(1)\"><h1>Probe Result</h1>"
+                    "<p><strong>Paper claim</strong>: the paper claims residual networks improve image classification accuracy.</p>"
+                    "<p><strong>Paper evidence</strong>: source span P0.S5 anchors this probe.</p>"
+                    "<p><strong>Experiment setup</strong>: run a bounded CIFAR-style GPU probe with the generated code path.</p>"
+                    "<figure><svg viewBox=\"0 0 100 40\" role=\"img\" aria-label=\"Accuracy bar\">"
+                    "<rect x=\"0\" y=\"8\" width=\"75\" height=\"20\" fill=\"#2563eb\"></rect>"
+                    "<text x=\"0\" y=\"36\">measured metric accuracy 0.75</text></svg></figure>"
+                    "<p><strong>Claim comparison</strong>: verdict supported for this bounded probe only.</p>"
+                    "<p><strong>Limitations</strong>: bounded run, not exact reproduction. Next step is a full paper config run.</p>"
+                    "<script>alert('bad')</script>"
+                    "<a href=\"javascript:alert(1)\">bad link</a>"
+                    "<p style=\"background:url(https://example.com/x.png)\">Safe text</p>"
+                    "</section>"
+                ),
+                "manifest": {"reproductionLevel": "probe"},
+            },
+        }
+
+        body = _validated_gpu_result(result, job)
+        report_html = body["artifacts"]["reportHtml"]
+
+        self.assertEqual(body["artifacts"]["generatedBy"], "model")
+        self.assertTrue(body["passed"], body)
+        self.assertIn("Probe Result", report_html)
+        self.assertIn("<svg", report_html.lower())
+        self.assertIn("<rect", report_html.lower())
+        self.assertIn("Safe text", report_html)
+        self.assertNotIn("visualAugmentedBy", body["artifacts"])
+        self.assertNotIn("<script", report_html.lower())
+        self.assertNotIn("onclick", report_html.lower())
+        self.assertNotIn("javascript:", report_html.lower())
+        self.assertNotIn("https://example.com", report_html)
+        self.assertFalse(body["artifacts"]["sandbox"]["scriptsAllowed"])
+        self.assertFalse(body["artifacts"]["sandbox"]["externalNetworkAllowed"])
 
     def test_gpu_result_still_fails_real_execution_errors(self):
         job = {
@@ -1606,7 +1902,18 @@ class BackendContractTests(unittest.TestCase):
             "evidenceHash": "evidence-hash",
             "metrics": {},
             "rows": [],
-            "logs": ["Generated GPU probe raised an exception inside Modal."],
+            "logs": [
+                "modal app=paperlens-modal-gpu-probe",
+                "cuda=True",
+                "gpu=T4",
+                "Token missing. Could not authenticate client.",
+                "see modal.com/docs/reference/modal.config for setup help.",
+                "register an account at modal.com, then run `modal token new`.",
+                "DeserializationError: Deserialization failed because the 'torch' module is not available.",
+                "/usr/local/lib/python3.12/site-packages/modal/_serialization.py:395 in deserialize_data_format",
+                "TypeError: float expected at most 1 argument, got 2",
+                "Generated GPU probe raised an exception inside Modal.",
+            ],
             "claimComparison": {"verdict": "failed_to_execute"},
             "limitations": [],
             "durationMs": 1200,
@@ -1616,8 +1923,23 @@ class BackendContractTests(unittest.TestCase):
 
         self.assertFalse(body["passed"], body)
         self.assertEqual(body["reproductionLevel"], "probe")
-        self.assertIn("RuntimeError: dataset download failed", body["reasons"])
-        self.assertIn("GPU probe returned no rows or metrics", body["reasons"])
+        serialized = json.dumps(body)
+        self.assertIn(
+            "The GPU run did not complete. Regenerate the sandbox files or choose a different paper-grounded direction.",
+            body["reasons"],
+        )
+        self.assertIn("The GPU run completed but did not return measurable rows or metrics.", body["reasons"])
+        self.assertNotIn("RuntimeError: dataset download failed", serialized)
+        self.assertNotIn("Generated GPU probe raised an exception inside Modal.", serialized)
+        self.assertNotIn("modal app=paperlens-modal-gpu-probe", serialized)
+        self.assertNotIn("cuda=True", serialized)
+        self.assertNotIn("gpu=T4", serialized)
+        self.assertNotIn("Token missing", serialized)
+        self.assertNotIn("modal.com/docs", serialized)
+        self.assertNotIn("modal token new", serialized)
+        self.assertNotIn("DeserializationError", serialized)
+        self.assertNotIn("_serialization.py", serialized)
+        self.assertNotIn("TypeError", serialized)
 
     def test_gpu_script_contract_rejects_counter_most_common_items_bug(self):
         code = """
@@ -1670,6 +1992,66 @@ def run_paperlens_gpu_probe(config=None):
         errors = _validate_gpu_script_contract(code)
 
         self.assertFalse(any("most_common" in reason for reason in errors), errors)
+
+    def test_gpu_script_contract_rejects_report_tokens_in_comments_only(self):
+        code = """
+import torch
+
+# reportHtml <svg> appears only in a comment and must not satisfy the sandbox report contract.
+def run_paperlens_gpu_probe(config=None):
+    cuda = torch.cuda.is_available()
+    return {
+        "passed": True,
+        "metrics": {"rows": 1},
+        "rows": [{"metric": "rows", "value": 1}],
+        "logs": [f"cuda={cuda}"],
+        "hardware": {"cudaAvailable": cuda},
+        "dataset": {"name": "real public dataset", "source": "torchvision/datasets path"},
+        "limitations": ["contract-only test"],
+        "claim_comparison": {"verdict": "directional_probe_only"},
+    }
+"""
+
+        errors = _validate_gpu_script_contract(code)
+
+        self.assertIn("GPU script must return a model-authored artifacts.reportHtml report", errors)
+        self.assertIn("GPU script must author a self-contained visual report artifact such as inline SVG or figure", errors)
+
+    def test_gpu_script_contract_rejects_generic_chart_only_report(self):
+        code = """
+import torch
+
+def run_paperlens_gpu_probe(config=None):
+    report = "<section><h1>Result</h1><figure><svg viewBox='0 0 100 30'><rect width='75' height='20'></rect></svg></figure><p>accuracy 0.75</p></section>"
+    return {
+        "passed": True,
+        "metrics": {"accuracy": 0.75},
+        "rows": [{"metric": "accuracy", "value": 0.75}],
+        "logs": [],
+        "hardware": {"cudaAvailable": torch.cuda.is_available()},
+        "dataset": {"name": "CIFAR-10", "source": "torchvision.datasets.CIFAR10"},
+        "limitations": ["bounded run"],
+        "claim_comparison": {"verdict": "directional_probe_only"},
+        "artifacts": {"reportHtml": report, "manifest": {"reproductionLevel": "probe"}},
+    }
+"""
+
+        errors = _validate_gpu_script_contract(code)
+
+        self.assertIn(
+            "GPU script reportHtml must include paper-grounded sections: paper claim, paper evidence, experiment setup, claim comparison, limitations",
+            errors,
+        )
+
+    def test_gpu_script_contract_reports_syntax_location_for_model_repair(self):
+        errors = _validate_gpu_script_contract(
+            "def run_paperlens_gpu_probe(config=None):\n"
+            "    return {'passed': True,,}\n"
+        )
+
+        self.assertTrue(errors)
+        self.assertIn("line 2", errors[0])
+        self.assertIn("column", errors[0])
 
     def test_gpu_script_contract_allows_pytorch_model_eval_method(self):
         code = """
@@ -2188,6 +2570,15 @@ def run(evidence_rows=None):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("experiment run id", response.json()["detail"])
+
+    def test_mini_lab_run_rejects_foreign_workspace_owner(self):
+        payload = self.authorized_mini_lab_payload(self.indexed_starter_payload(_valid_starter_code()))
+        payload["workspace_id"] = "workspace-other"
+
+        response = self.client.post("/api/mini-lab/run", json=payload)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("another browser session", response.json()["detail"])
 
     def test_mini_lab_run_rejects_code_that_differs_from_generated_run(self):
         payload = self.authorized_mini_lab_payload(self.indexed_starter_payload(_valid_starter_code()))

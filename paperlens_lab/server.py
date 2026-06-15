@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -39,7 +40,8 @@ from .validation_report import build_validation_summary
 ROOT_DIR = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = ROOT_DIR / "frontend"
 FRONTEND_OUT_DIR = FRONTEND_DIR / "out"
-REPRODUCTION_LEVELS = {"probe", "scaled", "exact"}
+DEFAULT_SANDBOX_WORKSPACE_DIR = Path("outputs/sandbox_workspaces")
+REPRODUCTION_LEVELS = {"probe", "exact"}
 
 
 class PaperInput(BaseModel):
@@ -75,11 +77,15 @@ class ExperimentInput(BaseModel):
     idea: str = ""
     locale: str = "en"
     use_model: bool = False
+    session_id: str = ""
+    workspace_id: str = ""
 
 
 class ExperimentCandidatesInput(ExperimentInput):
     question: str = ""
-    reproduction_level: str = "scaled"
+    reproduction_level: str = "probe"
+    session_id: str = ""
+    workspace_id: str = ""
 
 
 class GpuScriptInput(BaseModel):
@@ -88,13 +94,17 @@ class GpuScriptInput(BaseModel):
     paper_id: str = ""
     span_id: str = ""
     selected_span: str = ""
-    reproduction_level: str = "scaled"
+    reproduction_level: str = "probe"
     locale: str = "en"
     use_model: bool = False
+    session_id: str = ""
+    workspace_id: str = ""
 
 
 class GpuProbeRunInput(BaseModel):
     gpu_run_id: str
+    session_id: str = ""
+    workspace_id: str = ""
 
 
 class TranslationInput(BaseModel):
@@ -141,9 +151,11 @@ class MiniLabRunInput(BaseModel):
     paper_title: str = "Untitled paper"
     span_id: str
     selected_span: str = ""
+    session_id: str = ""
+    workspace_id: str = ""
 
 
-def _reproduction_level(value: str, default: str = "scaled") -> str:
+def _reproduction_level(value: str, default: str = "probe") -> str:
     level = clean_text(value).lower().replace(" ", "_").replace("-", "_")
     if level in REPRODUCTION_LEVELS:
         return level
@@ -154,10 +166,10 @@ def _validated_reproduction_level(value: str) -> str:
     level = clean_text(value).lower().replace(" ", "_").replace("-", "_")
     if level in REPRODUCTION_LEVELS:
         return level
-    raise HTTPException(status_code=400, detail="Reproduction level must be one of: probe, scaled, exact.")
+    raise HTTPException(status_code=400, detail="Reproduction level must be one of: probe, exact.")
 
 
-def _candidate_reproduction_level(candidate: dict[str, Any], fallback: str = "scaled") -> str:
+def _candidate_reproduction_level(candidate: dict[str, Any], fallback: str = "probe") -> str:
     return _reproduction_level(str(candidate.get("reproduction_level") or ""), default=fallback)
 
 
@@ -521,6 +533,7 @@ def _register_api(app: FastAPI) -> None:
 
     @app.post("/api/experiment/candidates")
     def build_experiment_candidates(payload: ExperimentCandidatesInput) -> dict[str, Any]:
+        _client_owner(payload.session_id, payload.workspace_id)
         context = _experiment_context(payload)
         question = clean_text(payload.question or payload.idea) or (
             "What experiment should we run from this selected paper evidence?"
@@ -541,7 +554,13 @@ def _register_api(app: FastAPI) -> None:
             use_model=use_model,
         )
         if result.used_fallback or result.error:
-            raise HTTPException(status_code=503, detail=result.error or "Experiment candidates were unavailable.")
+            raise HTTPException(
+                status_code=503,
+                detail=_public_experiment_candidates_error(
+                    payload.locale,
+                    result.error or "Experiment candidates were unavailable.",
+                ),
+            )
         candidate_set = _issue_candidate_set(
             paper_id=payload.paper_id,
             paper_title=payload.paper_title,
@@ -556,6 +575,8 @@ def _register_api(app: FastAPI) -> None:
             provider=result.provider,
             model=result.model,
             implementation_links=extract_implementation_links(context["sourceText"]),
+            session_id=payload.session_id,
+            workspace_id=payload.workspace_id,
         )
         return {
             "candidateSetId": candidate_set["id"],
@@ -575,7 +596,7 @@ def _register_api(app: FastAPI) -> None:
     def build_gpu_script(payload: GpuScriptInput) -> dict[str, Any]:
         candidate_set = _validated_candidate_set(payload)
         candidate = _candidate_from_set(candidate_set, payload.candidate_id)
-        reproduction_level = _candidate_reproduction_level(candidate, fallback=candidate_set.get("reproductionLevel", "scaled"))
+        reproduction_level = _candidate_reproduction_level(candidate, fallback=candidate_set.get("reproductionLevel", "probe"))
         gateway = ModelGateway()
         use_model = _should_use_model(payload.use_model)
         if not use_model:
@@ -620,6 +641,8 @@ def _register_api(app: FastAPI) -> None:
         return {
             "gpuRunId": gpu_run["id"],
             "gpuRun": gpu_run,
+            "workspaceId": gpu_run.get("workspaceId", gpu_run["id"]),
+            "workspace": gpu_run.get("workspace", {}),
             "candidate": candidate,
             "reproductionLevel": reproduction_level,
             "requestedReproductionLevel": candidate_set.get("reproductionLevel", reproduction_level),
@@ -649,10 +672,12 @@ def _register_api(app: FastAPI) -> None:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         binding["lastResult"] = result
         binding["lastRunAt"] = time.time()
+        _persist_sandbox_result(binding, result)
         return result
 
     @app.post("/api/experiment")
     def build_experiment(payload: ExperimentInput) -> dict[str, Any]:
+        _client_owner(payload.session_id, payload.workspace_id)
         if not payload.paper_id or not payload.span_id:
             raise HTTPException(status_code=400, detail="Experiment requires an indexed paper id and selected span id.")
         indexed_text = get_span_text(payload.paper_id, payload.span_id) if payload.paper_id and payload.span_id else ""
@@ -722,6 +747,8 @@ def _register_api(app: FastAPI) -> None:
             starter_provider=starter_result.provider,
             starter_model=starter_result.model,
             implementation_repo_manifests=implementation_repo_manifests,
+            session_id=payload.session_id,
+            workspace_id=payload.workspace_id,
         )
         return {
             "card": result.text,
@@ -889,7 +916,10 @@ def _issue_experiment_run(
     starter_provider: str,
     starter_model: str,
     implementation_repo_manifests: list[dict[str, Any]] | None = None,
+    session_id: str,
+    workspace_id: str,
 ) -> dict[str, Any]:
+    owner = _client_owner(session_id, workspace_id)
     _prune_experiment_runs()
     run_id = f"exp_{secrets.token_urlsafe(18)}"
     now = time.time()
@@ -897,6 +927,7 @@ def _issue_experiment_run(
         "id": run_id,
         "createdAt": now,
         "expiresAt": now + _EXPERIMENT_RUN_TTL_SECONDS,
+        **owner,
         "paperId": paper_id,
         "paperTitle": paper_title or "Untitled paper",
         "spanId": span_id,
@@ -925,7 +956,7 @@ def _experiment_context(payload: ExperimentInput) -> dict[str, Any]:
     window = evidence_window(payload.paper_id, payload.span_id)
     if not window:
         raise HTTPException(status_code=404, detail="Selected span was not found in the paper index.")
-    source_text = clean_text((window["text"] if window else payload.source_text) or indexed_text or payload.selected_span)
+    source_text = clean_text(_indexed_paper_text(payload.paper_id) or payload.source_text or indexed_text or payload.selected_span)
     selected_span = _selected_text_from_payload(
         payload.selected_span,
         indexed_text=indexed_text,
@@ -937,6 +968,36 @@ def _experiment_context(payload: ExperimentInput) -> dict[str, Any]:
         "sourceText": source_text,
         "selectedSpan": selected_span,
     }
+
+
+def _indexed_paper_text(paper_id: str) -> str:
+    record = load_source_index(paper_id)
+    if not record:
+        return ""
+    spans = record.get("spans", [])
+    if not isinstance(spans, list):
+        return ""
+    ordered_spans = sorted(
+        (span for span in spans if isinstance(span, dict)),
+        key=lambda span: int(span.get("position") or 0),
+    )
+    return clean_text(" ".join(str(span.get("text") or "") for span in ordered_spans))
+
+
+def _client_owner(session_id: str, workspace_id: str) -> dict[str, str]:
+    session = clean_text(session_id)
+    workspace = clean_text(workspace_id)
+    if not session or not workspace:
+        raise HTTPException(status_code=403, detail="Lab workspace session is required. Reload the reader and try again.")
+    if len(session) > 120 or len(workspace) > 120:
+        raise HTTPException(status_code=403, detail="Lab workspace session is invalid. Reload the reader and try again.")
+    return {"sessionId": session, "workspaceOwnerId": workspace}
+
+
+def _assert_client_owner(binding: dict[str, Any], session_id: str, workspace_id: str) -> None:
+    owner = _client_owner(session_id, workspace_id)
+    if binding.get("sessionId") != owner["sessionId"] or binding.get("workspaceOwnerId") != owner["workspaceOwnerId"]:
+        raise HTTPException(status_code=403, detail="This Lab workspace belongs to another browser session. Regenerate it in this tab.")
 
 
 def _issue_candidate_set(
@@ -954,14 +1015,18 @@ def _issue_candidate_set(
     provider: str,
     model: str,
     implementation_links: list[dict[str, str]] | None = None,
+    session_id: str,
+    workspace_id: str,
 ) -> dict[str, Any]:
     _prune_experiment_runs()
+    owner = _client_owner(session_id, workspace_id)
     set_id = f"cand_{secrets.token_urlsafe(18)}"
     now = time.time()
     binding = {
         "id": set_id,
         "createdAt": now,
         "expiresAt": now + _EXPERIMENT_RUN_TTL_SECONDS,
+        **owner,
         "paperId": paper_id,
         "paperTitle": paper_title or "Untitled paper",
         "spanId": span_id,
@@ -991,7 +1056,7 @@ def _public_candidate_set(binding: dict[str, Any]) -> dict[str, Any]:
         "selectedSpanHash": binding["selectedSpanHash"],
         "sourceHash": binding["sourceHash"],
         "question": binding["question"],
-        "reproductionLevel": binding.get("reproductionLevel", "scaled"),
+        "reproductionLevel": binding.get("reproductionLevel", "probe"),
         "candidates": binding["candidates"],
         "recommendedCandidateId": binding["recommendedCandidateId"],
         "candidateTraceId": binding["candidateTraceId"],
@@ -1007,6 +1072,7 @@ def _validated_candidate_set(payload: GpuScriptInput) -> dict[str, Any]:
     binding = _CANDIDATE_SETS.get(payload.candidate_set_id.strip())
     if not binding:
         raise HTTPException(status_code=403, detail="Experiment candidate set was not found or expired. Regenerate candidates.")
+    _assert_client_owner(binding, payload.session_id, payload.workspace_id)
     mismatch_reasons = []
     if payload.paper_id != binding["paperId"]:
         mismatch_reasons.append("paper id")
@@ -1014,7 +1080,7 @@ def _validated_candidate_set(payload: GpuScriptInput) -> dict[str, Any]:
         mismatch_reasons.append("span id")
     if clean_text(payload.selected_span) != binding["selectedSpan"]:
         mismatch_reasons.append("selected span")
-    if _validated_reproduction_level(payload.reproduction_level) != binding.get("reproductionLevel", "scaled"):
+    if _validated_reproduction_level(payload.reproduction_level) != binding.get("reproductionLevel", "probe"):
         mismatch_reasons.append("reproduction level")
     if mismatch_reasons:
         raise HTTPException(
@@ -1058,6 +1124,10 @@ def _exact_reproduction_blocker(
 ) -> str:
     if reproduction_level != "exact":
         return ""
+    if os.getenv("PAPERLENS_ENABLE_EXACT_REPO_RUNNER", "").strip().lower() not in {"1", "true", "yes"}:
+        if locale == "ko":
+            return "Exact 재현은 repo/config/dataset을 실제로 실행하는 별도 sandbox runner가 필요합니다. 현재 runner에서는 Probe로 진행하세요."
+        return "Exact reproduction requires the repo/config/dataset sandbox runner. Use Probe with the current GPU runner."
     inspected = [
         manifest
         for manifest in implementation_repo_manifests or []
@@ -1066,8 +1136,8 @@ def _exact_reproduction_blocker(
     if inspected:
         return ""
     if locale == "ko":
-        return "Exact 재현은 논문에 나온 구현 저장소를 실제로 확인한 뒤에만 실행할 수 있습니다. 지금은 Scaled 또는 Probe로 진행하세요."
-    return "Exact reproduction requires an inspected implementation repository from the paper. Use Scaled or Probe for this span."
+        return "Exact 재현은 논문에 나온 구현 저장소를 실제로 확인한 뒤에만 실행할 수 있습니다. 지금은 Probe로 진행하세요."
+    return "Exact reproduction requires an inspected implementation repository from the paper. Use Probe for this paper direction."
 
 
 def _issue_gpu_probe_run(
@@ -1088,6 +1158,8 @@ def _issue_gpu_probe_run(
         "id": run_id,
         "createdAt": now,
         "expiresAt": now + _EXPERIMENT_RUN_TTL_SECONDS,
+        "sessionId": candidate_set["sessionId"],
+        "workspaceOwnerId": candidate_set["workspaceOwnerId"],
         "candidateSetId": candidate_set["id"],
         "candidateId": candidate["id"],
         "candidate": candidate,
@@ -1103,12 +1175,15 @@ def _issue_gpu_probe_run(
         "gpuTraceId": gpu_trace_id,
         "provider": provider,
         "model": model,
-        "reproductionLevel": _candidate_reproduction_level(candidate, fallback=candidate_set.get("reproductionLevel", "scaled")),
-        "requestedReproductionLevel": candidate_set.get("reproductionLevel", "scaled"),
+        "reproductionLevel": _candidate_reproduction_level(candidate, fallback=candidate_set.get("reproductionLevel", "probe")),
+        "requestedReproductionLevel": candidate_set.get("reproductionLevel", "probe"),
         "scriptData": script_data,
         "implementationRepoManifests": implementation_repo_manifests or [],
     }
+    binding["workspaceId"] = f"sandbox_{run_id.removeprefix('gpu_')}"
+    binding["workspace"] = _gpu_script_workspace(binding)
     _GPU_PROBE_RUNS[run_id] = binding
+    _persist_sandbox_workspace(binding["workspace"])
     return _public_gpu_probe_run(binding)
 
 
@@ -1127,10 +1202,88 @@ def _public_gpu_probe_run(binding: dict[str, Any]) -> dict[str, Any]:
         "gpuTraceId": binding["gpuTraceId"],
         "provider": binding["provider"],
         "model": binding["model"],
-        "reproductionLevel": binding.get("reproductionLevel", "scaled"),
-        "requestedReproductionLevel": binding.get("requestedReproductionLevel", binding.get("reproductionLevel", "scaled")),
+        "reproductionLevel": binding.get("reproductionLevel", "probe"),
+        "requestedReproductionLevel": binding.get("requestedReproductionLevel", binding.get("reproductionLevel", "probe")),
         "implementationRepoManifests": binding.get("implementationRepoManifests", []),
+        "workspaceId": binding.get("workspaceId", binding["id"]),
+        "workspace": binding.get("workspace", {}),
         "expiresAt": binding["expiresAt"],
+    }
+
+
+def _gpu_script_workspace(binding: dict[str, Any]) -> dict[str, Any]:
+    script_data = binding.get("scriptData") if isinstance(binding.get("scriptData"), dict) else {}
+    candidate = binding.get("candidate") if isinstance(binding.get("candidate"), dict) else {}
+    plan = script_data.get("reproduction_plan") if isinstance(script_data.get("reproduction_plan"), dict) else {}
+    dataset = script_data.get("dataset") if isinstance(script_data.get("dataset"), dict) else {}
+    config_payload = {
+        "paperTitle": binding.get("paperTitle", ""),
+        "spanId": binding.get("spanId", ""),
+        "candidateId": binding.get("candidateId", ""),
+        "candidateTitle": candidate.get("title", ""),
+        "reproductionLevel": binding.get("reproductionLevel", "probe"),
+        "requestedReproductionLevel": binding.get("requestedReproductionLevel", "probe"),
+        "dataset": dataset,
+        "reproductionPlan": plan,
+        "expectedOutputs": script_data.get("expected_outputs", []),
+        "paperClaimComparisonPlan": script_data.get("paper_claim_comparison_plan", ""),
+        "limitations": script_data.get("limitations", []),
+        "codeHash": binding.get("codeHash", ""),
+        "evidenceHash": binding.get("sourceHash", ""),
+    }
+    manifest_payload = {
+        "workspaceId": binding.get("workspaceId", binding.get("id", "")),
+        "gpuRunId": binding.get("id", ""),
+        "candidateSetId": binding.get("candidateSetId", ""),
+        "provider": binding.get("provider", ""),
+        "model": binding.get("model", ""),
+        "implementationRepoManifests": binding.get("implementationRepoManifests", []),
+        **config_payload,
+    }
+    run_command = clean_text(str(plan.get("command") or "Run from PaperLens with the approved GPU run binding."))
+    files = [
+        {
+            "path": "experiment.py",
+            "language": "python",
+            "role": "entrypoint",
+            "content": str(binding.get("code") or ""),
+        },
+        {
+            "path": "config.json",
+            "language": "json",
+            "role": "configuration",
+            "content": json.dumps(config_payload, ensure_ascii=False, indent=2, sort_keys=True),
+        },
+        {
+            "path": "run.sh",
+            "language": "shell",
+            "role": "command",
+            "content": "# Executed through the approved PaperLens Modal GPU binding.\n" f"# Paper/source-bound command: {run_command}\n",
+        },
+        {
+            "path": "manifest.json",
+            "language": "json",
+            "role": "provenance",
+            "content": json.dumps(manifest_payload, ensure_ascii=False, indent=2, sort_keys=True),
+        },
+    ]
+    return {
+        "id": binding.get("workspaceId", binding.get("id", "")),
+        "status": "script_ready",
+        "title": candidate.get("title") or "PaperLens sandbox workspace",
+        "paperTitle": binding.get("paperTitle", ""),
+        "reproductionLevel": binding.get("reproductionLevel", "probe"),
+        "requestedReproductionLevel": binding.get("requestedReproductionLevel", "probe"),
+        "plan": plan,
+        "dataset": dataset,
+        "files": files,
+        "provenance": {
+            "codeHash": binding.get("codeHash", ""),
+            "sourceHash": binding.get("sourceHash", ""),
+            "candidateTraceId": binding.get("candidateTraceId", ""),
+            "gpuTraceId": binding.get("gpuTraceId", ""),
+            "implementationRepoManifests": binding.get("implementationRepoManifests", []),
+        },
     }
 
 
@@ -1142,7 +1295,43 @@ def _validated_gpu_probe_run(payload: GpuProbeRunInput) -> dict[str, Any]:
     binding = _GPU_PROBE_RUNS.get(run_id)
     if not binding:
         raise HTTPException(status_code=403, detail="GPU run id was not found or expired. Regenerate the script.")
+    _assert_client_owner(binding, payload.session_id, payload.workspace_id)
     return binding
+
+
+def _persist_sandbox_workspace(workspace: dict[str, Any]) -> None:
+    workspace_id = clean_text(str(workspace.get("id") or ""))
+    if not workspace_id:
+        return
+    try:
+        workspace_dir = _sandbox_workspace_dir() / workspace_id
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "workspace.json").write_text(
+            json.dumps(workspace, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _persist_sandbox_result(binding: dict[str, Any], result: dict[str, Any]) -> None:
+    workspace_id = clean_text(str(binding.get("workspaceId") or ""))
+    if not workspace_id:
+        return
+    try:
+        workspace_dir = _sandbox_workspace_dir() / workspace_id
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "result.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _sandbox_workspace_dir() -> Path:
+    configured = os.getenv("PAPERLENS_SANDBOX_WORKSPACE_DIR", "").strip()
+    return Path(configured) if configured else DEFAULT_SANDBOX_WORKSPACE_DIR
 
 
 def _validated_experiment_run(payload: MiniLabRunInput) -> dict[str, Any]:
@@ -1153,6 +1342,7 @@ def _validated_experiment_run(payload: MiniLabRunInput) -> dict[str, Any]:
     binding = _EXPERIMENT_RUNS.get(run_id)
     if not binding:
         raise HTTPException(status_code=403, detail="Experiment run id was not found or expired. Regenerate the experiment.")
+    _assert_client_owner(binding, payload.session_id, payload.workspace_id)
 
     mismatch_reasons = []
     if payload.paper_id != binding["paperId"]:
@@ -1583,6 +1773,12 @@ def _public_gpu_script_error(locale: str, error: str) -> str:
     if locale == "ko":
         return "모델이 생성한 GPU 스크립트가 서비스 실행 검증을 통과하지 못했습니다. 후보를 다시 생성하거나 다른 후보를 승인해 주세요."
     return "The model-generated GPU script did not pass service execution checks. Regenerate candidates or approve a different candidate."
+
+
+def _public_experiment_candidates_error(locale: str, error: str) -> str:
+    if locale == "ko":
+        return "모델이 이 논문에서 실행 가능한 연구 방향을 확정하지 못했습니다. 질문을 좁히거나 다시 시도해 주세요."
+    return "The model could not finalize paper-grounded research directions. Refine the question or try again."
 
 
 def _force_model_enabled() -> bool:

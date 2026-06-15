@@ -16,6 +16,7 @@ from .gpu_lab import _validate_gpu_script_contract
 from .prompts import (
     evidence_probe_prompt,
     experiment_candidates_prompt,
+    experiment_candidates_repair_prompt,
     experiment_prompt,
     experiment_repair_prompt,
     gpu_script_prompt,
@@ -44,10 +45,18 @@ DEFAULT_PROVIDER = os.getenv("PAPERLENS_PROVIDER", "hf")
 QUALITY_MODEL = os.getenv("PAPERLENS_QUALITY_MODEL", DEFAULT_MODEL)
 TRANSLATION_MODEL = os.getenv("PAPERLENS_TRANSLATION_MODEL", os.getenv("PAPERLENS_MODEL", DEFAULT_SMALL_MULTILINGUAL_MODEL))
 STRICT_MODEL_PROOF_TASKS = {"experiment_candidates", "gpu_script"}
-REPRODUCTION_LEVELS = {"probe", "scaled", "exact"}
+REPRODUCTION_LEVELS = {"probe", "exact"}
 
 
-def _normalize_reproduction_level(value: str, default: str = "scaled") -> str:
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+    return max(1, value)
+
+
+def _normalize_reproduction_level(value: str, default: str = "probe") -> str:
     level = clean_text(value).lower().replace(" ", "_").replace("-", "_")
     return level if level in REPRODUCTION_LEVELS else default
 
@@ -326,7 +335,7 @@ class ModelGateway:
         source_text: str,
         question: str,
         locale: str,
-        reproduction_level: str = "scaled",
+        reproduction_level: str = "probe",
         use_model: bool = False,
     ) -> ModelResult:
         task = "experiment_candidates"
@@ -401,7 +410,7 @@ class ModelGateway:
         use_model: bool = False,
     ) -> ModelResult:
         task = "gpu_script"
-        reproduction_level = _normalize_reproduction_level(str(candidate.get("reproduction_level") or "scaled"))
+        reproduction_level = _normalize_reproduction_level(str(candidate.get("reproduction_level") or "probe"))
         evidence = _evidence_items(source_text or selected_span, selected_span=selected_span)
         prompt = gpu_script_prompt(
             paper_title,
@@ -433,7 +442,7 @@ class ModelGateway:
             prompt,
             fallback,
             use_model=use_model,
-            max_new_tokens=2800,
+            max_new_tokens=_env_int("PAPERLENS_GPU_SCRIPT_MAX_NEW_TOKENS", 2100),
             quality=True,
             context={
                 "selected_span": selected_span,
@@ -689,17 +698,35 @@ def generate_with_hf_inference(
     token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or True
     first_error: Exception | None = None
     try:
-        client = InferenceClient(model=model_id, token=token)
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_new_tokens,
-            temperature=0.15,
+        client = InferenceClient(
+            model=model_id,
+            token=token,
+            timeout=_env_int("PAPERLENS_HF_TIMEOUT_SECONDS", 120),
         )
+        chat_kwargs: dict[str, Any] = {
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_new_tokens,
+            "temperature": 0.15,
+        }
+        if _hf_json_mode_enabled() and "return only valid json" in prompt.lower():
+            try:
+                response = client.chat.completions.create(
+                    **chat_kwargs,
+                    response_format={"type": "json_object"},
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as exc:
+                first_error = exc
+        response = client.chat.completions.create(**chat_kwargs)
         return response.choices[0].message.content.strip()
     except Exception as exc:
-        first_error = exc
+        first_error = first_error or exc
         try:
-            client = InferenceClient(model=model_id, token=token)
+            client = InferenceClient(
+                model=model_id,
+                token=token,
+                timeout=_env_int("PAPERLENS_HF_TIMEOUT_SECONDS", 120),
+            )
             return client.text_generation(
                 prompt,
                 max_new_tokens=max_new_tokens,
@@ -711,6 +738,10 @@ def generate_with_hf_inference(
             if raise_errors:
                 raise RuntimeError(f"HF inference failed: chat={first_error}; text_generation={exc}") from exc
             return None
+
+
+def _hf_json_mode_enabled() -> bool:
+    return os.getenv("PAPERLENS_HF_JSON_MODE", "1").lower() not in {"0", "false", "no"}
 
 
 def generate_with_modal(
@@ -1034,7 +1065,7 @@ def _normalize_experiment_candidates(
         return data
     normalized: list[dict[str, Any]] = []
     recommended_id = str(data.get("recommended_candidate_id") or "").strip()
-    requested_level = _normalize_reproduction_level(str((context or {}).get("reproduction_level") or "scaled"))
+    requested_level = _normalize_reproduction_level(str((context or {}).get("reproduction_level") or "probe"))
     for index, item in enumerate(candidates[:3], start=1):
         if not isinstance(item, dict):
             continue
@@ -1054,14 +1085,13 @@ def _normalize_experiment_candidates(
             candidate["dataset"] = {"name": str(candidate.get("dataset") or ""), "source": ""}
         if not isinstance(candidate.get("implementation"), dict):
             candidate["implementation"] = {"type": "source_bound_probe", "repo_url": "", "reason": ""}
-        candidate["reproduction_level"] = _normalize_reproduction_level(
-            str(candidate.get("reproduction_level") or requested_level),
-            default=requested_level,
-        )
+        raw_level = clean_text(str(candidate.get("reproduction_level") or "")).lower().replace(" ", "_").replace("-", "_")
+        candidate["reproduction_level"] = raw_level if raw_level else requested_level
         faithfulness = candidate.get("faithfulness") if isinstance(candidate.get("faithfulness"), dict) else {}
+        raw_faithfulness_level = clean_text(str(faithfulness.get("level") or "")).lower().replace(" ", "_").replace("-", "_")
         candidate["faithfulness"] = {
             **faithfulness,
-            "level": _normalize_reproduction_level(str(faithfulness.get("level") or candidate["reproduction_level"]), default=candidate["reproduction_level"]),
+            "level": raw_faithfulness_level or candidate["reproduction_level"],
         }
         if not isinstance(candidate.get("run_plan"), dict):
             dataset = candidate.get("dataset") if isinstance(candidate.get("dataset"), dict) else {}
@@ -1427,9 +1457,15 @@ def _experiment_candidate_contract_errors(data: dict[str, Any], context: dict[st
         if not isinstance(item.get("dataset"), dict):
             errors.append(f"candidate {index} missing dataset")
         implementation = item.get("implementation")
-        reproduction_level = _normalize_reproduction_level(str(item.get("reproduction_level") or ""))
-        if not reproduction_level:
+        raw_reproduction_level = clean_text(str(item.get("reproduction_level") or "")).lower().replace(" ", "_").replace("-", "_")
+        if not raw_reproduction_level:
             errors.append(f"candidate {index} missing reproduction_level")
+            reproduction_level = ""
+        elif raw_reproduction_level not in REPRODUCTION_LEVELS:
+            errors.append(f"candidate {index} invalid reproduction_level {raw_reproduction_level}")
+            reproduction_level = raw_reproduction_level
+        else:
+            reproduction_level = raw_reproduction_level
         if isinstance(implementation, dict):
             repo_url = _canonical_github_repo_url(str(implementation.get("repo_url") or ""))
             if repo_url and repo_url.lower() not in approved_repo_roots:
@@ -1535,7 +1571,11 @@ def _gpu_script_contract_errors(data: dict[str, Any], context: dict[str, Any] | 
         errors.append("missing reproduction_plan")
     elif _normalize_reproduction_level(str(reproduction_plan.get("level") or ""), default=script_level) != script_level:
         errors.append("reproduction_plan.level must match reproduction_level")
-    elif script_level == "exact":
+    else:
+        repo_url = _canonical_github_repo_url(str(reproduction_plan.get("repo_url") or ""))
+        if repo_url and repo_url.lower() not in _approved_inspected_repo_roots(context):
+            errors.append("reproduction_plan.repo_url must match an inspected paper implementation repo")
+    if isinstance(reproduction_plan, dict) and script_level == "exact":
         repo_url = _canonical_github_repo_url(str(reproduction_plan.get("repo_url") or ""))
         if not repo_url:
             errors.append("exact GPU script requires reproduction_plan.repo_url")
@@ -1596,6 +1636,19 @@ def _repair_task_output_prompt(
         )
     if task == "experiment_spec":
         return experiment_repair_prompt(raw, error)
+    if task == "experiment_candidates":
+        source_evidence = context.get("source_evidence") if isinstance(context.get("source_evidence"), list) else []
+        implementation_links = (
+            context.get("implementation_links") if isinstance(context.get("implementation_links"), list) else []
+        )
+        return experiment_candidates_repair_prompt(
+            raw,
+            error,
+            source_evidence,
+            str(context.get("reproduction_level") or "probe"),
+            str(context.get("locale") or "en"),
+            implementation_links=implementation_links,
+        )
     if task == "starter_code":
         return starter_code_repair_prompt(
             raw,
@@ -1611,7 +1664,7 @@ def _repair_task_output_prompt(
             error,
             candidate,
             source_evidence,
-            str(context.get("reproduction_level") or candidate.get("reproduction_level") or "scaled"),
+            str(context.get("reproduction_level") or candidate.get("reproduction_level") or "probe"),
             str(context.get("locale") or "en"),
         )
     if task == "research_growth":
@@ -1745,6 +1798,11 @@ def _parse_json_object(raw: str) -> dict[str, Any] | None:
 
 
 def _coerce_non_json_task_output(task: str, raw: str) -> dict[str, Any] | None:
+    if task == "gpu_script":
+        # GPU scripts must keep their model-authored JSON envelope. If the model
+        # emits raw Python, the repair prompt can wrap its own code; PaperLens
+        # must not infer experiment metadata and turn it into a product success.
+        return None
     if task != "starter_code":
         return None
     code = _extract_probable_python_code(raw)
